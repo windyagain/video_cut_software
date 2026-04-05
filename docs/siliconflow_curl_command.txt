@@ -1,0 +1,33 @@
+curl -sS https://api.siliconflow.cn/v1/chat/completions \
+  -H "Authorization: Bearer $SILICONFLOW_API_KEY" \
+  -H "Content-Type: application/json" \
+  -w '\n\nHTTP:%{http_code}\nDNS:%{time_namelookup}s\nTCP:%{time_connect}s\nTLS:%{time_appconnect}s\nTTFB:%{time_starttransfer}s\nTOTAL:%{time_total}s\n' \
+  --data-raw "$(node -e '
+const fs = require("fs");
+const flowPath = "/Users/pxy/PycharmProjects/oauth_login_multi_project/FLOW.md";
+const asrPath = "/Users/pxy/PycharmProjects/video_cut_software/crates/video_engine/tests/data/full_pipeline_asr.json";
+let flow = fs.readFileSync(flowPath, "utf8");
+flow = flow.replace(/sk-[A-Za-z0-9_-]+/g, "[REDACTED_API_KEY]");
+const asr = JSON.parse(fs.readFileSync(asrPath, "utf8"));
+const lines = (asr.segments || []).map((s, i) => `[${i}] (${Number(s.start).toFixed(2)}-${Number(s.end).toFixed(2)}) ${String(s.text || "").trim()}`);
+const payload = {
+  model: "zai-org/GLM-4.6V",
+  temperature: 0.1,
+  messages: [
+    {
+      role: "system",
+      content: "你是字幕校正助手。只修正错别字、口语冗余和明显语病；不得改变原意，不得新增事实，不得改时间轴。输出必须是 JSON。"
+    },
+    {
+      role: "user",
+      content:
+        "请校正以下 ASR 字幕。\\n\\n" +
+        "输出格式严格为：{\\\"items\\\":[{\\\"index\\\":0,\\\"corrected_text\\\":\\\"...\\\"}]}\\n" +
+        "仅返回 JSON，不要解释。\\n\\n" +
+        "参考稿件全文（FLOW.md，已脱敏）：\\n" + flow + "\\n\\n" +
+        "ASR 字幕分段（完整）：\\n" + lines.join("\\n")
+    }
+  ]
+};
+process.stdout.write(JSON.stringify(payload));
+')"

@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Video Cut Studio</title>
+    <script type="module" src="/src/main.ts" defer></script>
+  </head>
+  <body>
+    <main class="layout">
+      <aside class="left-panel">
+        <div class="brand">Video Cut Studio</div>
+        <div class="left-section">
+          <h3>素材</h3>
+          <button id="pickVideo" class="primary">导入视频</button>
+          <input id="inputVideo" class="path" placeholder="未选择视频" />
+        </div>
+
+        <div class="left-section">
+          <h3>参考文本（可选）</h3>
+          <button id="pickReference">导入参考稿件</button>
+          <input id="referenceScript" class="path" placeholder="未选择文本" />
+        </div>
+
+        <div class="left-section compact">
+          <h3>本地转写引擎</h3>
+          <button id="btnDetectWhisper">检测环境</button>
+          <button id="btnInstallWhisper" class="primary">一键安装转写引擎</button>
+          <div id="setupStatus" class="muted">未检测</div>
+        </div>
+      </aside>
+
+      <section class="center-panel">
+        <header class="topbar">
+          <div>
+            <h1>本地视频处理</h1>
+            <p>生成字幕（抽音频+转写+纠正） -> 手动烧录</p>
+          </div>
+          <div class="topbar-actions">
+            <button id="btnGenerateSubtitles" class="primary">1. 生成字幕</button>
+            <button id="btnBurn">2. 手动烧录字幕</button>
+          </div>
+        </header>
+
+        <div class="preview">
+          <div class="preview-title">预览与字幕编辑</div>
+          <div class="preview-canvas">
+            <video id="previewVideo" controls preload="metadata"></video>
+            <div id="subtitleOverlay" class="subtitle-overlay"></div>
+          </div>
+        </div>
+
+        <div class="project-row">
+          <input id="projectPath" placeholder="项目路径: /path/project.json" />
+          <button id="btnSave">保存项目</button>
+          <button id="btnLoad">加载项目</button>
+        </div>
+
+        <pre id="log"></pre>
+      </section>
+
+      <aside class="right-panel">
+        <div class="tabs">
+          <button class="tab-btn active" data-tab="subtitles">字幕</button>
+          <button class="tab-btn" data-tab="style">样式</button>
+          <button class="tab-btn" data-tab="advanced">高级</button>
+        </div>
+
+        <section class="tab-panel active" data-tab="subtitles">
+          <div class="subtitle-toolbar">
+            <button id="loadExternalSubtitles">加载外部字幕</button>
+            <button id="loadOriginalSubtitles">加载识别字幕</button>
+            <button id="loadCorrectedSubtitles">加载纠正字幕</button>
+            <button id="saveEditedSubtitles" class="primary">保存当前字幕</button>
+          </div>
+          <div id="subtitleList" class="subtitle-list"></div>
+        </section>
+
+        <section class="tab-panel style-panel" data-tab="style">
+          <label class="style-field">位置
+            <select id="position">
+              <option value="bottom">底部</option>
+              <option value="center">中部</option>
+              <option value="top">顶部</option>
+            </select>
+          </label>
+          <label class="style-field">字号 <input id="fontSize" type="number" min="12" max="96" step="1" value="17" /></label>
+          <div class="style-color-row">
+            <label class="style-color-field">文字颜色
+              <span class="color-control">
+                <input id="textColor" type="color" value="#ffe200" />
+                <span id="textColorPreview" class="color-preview"></span>
+                <span id="textColorValue" class="color-value">#FFE200</span>
+              </span>
+            </label>
+            <label class="style-color-field">背景颜色
+              <span class="color-control">
+                <input id="bgColor" type="color" value="#000000" />
+                <span id="bgColorPreview" class="color-preview"></span>
+                <span id="bgColorValue" class="color-value">#000000</span>
+              </span>
+            </label>
+          </div>
+          <p class="muted">当前样式先作为项目配置保存，导出渲染下一步接入。</p>
+        </section>
+
+        <section class="tab-panel" data-tab="advanced">
+          <label>whisper 可执行文件 <input id="whisperBin" placeholder="/path/whisper-cli" /></label>
+          <label>whisper 模型 <input id="whisperModel" placeholder="/path/ggml-base.bin" /></label>
+          <label>语言 <input id="language" value="zh" /></label>
+          <label>音频输出 <input id="audioWav" placeholder="/path/clip.wav" /></label>
+          <label>whisper 原始 JSON <input id="whisperJson" placeholder="/path/asr.raw.json" /></label>
+          <label>字幕 JSON <input id="subtitlesJson" placeholder="/path/asr.json" /></label>
+          <label>纠正后字幕 JSON <input id="correctedJson" placeholder="/path/asr.corrected.json" /></label>
+          <label>烧录输出视频 <input id="renderedVideo" placeholder="/path/output.subtitled.mp4" /></label>
+          <input id="clippedVideo" style="display: none" />
+          <input id="cutStart" style="display: none" value="0" />
+          <input id="cutDuration" style="display: none" value="0" />
+        </section>
+      </aside>
+    </main>
+  </body>
+</html>
