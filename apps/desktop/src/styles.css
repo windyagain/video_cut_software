@@ -189,6 +189,23 @@ body {
   gap: 8px;
 }
 
+.style-compact-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 6px;
+}
+
+.style-compact-item {
+  gap: 3px;
+  font-size: 12px;
+}
+
+.style-compact-item input {
+  min-height: 30px;
+  padding: 4px 7px;
+  font-size: 12px;
+}
+
 .style-color-field {
   gap: 4px;
 }

@@ -137,6 +137,40 @@ pub fn burn_subtitles(
     Ok(())
 }
 
+pub fn burn_ass_file(
+    input_video: impl AsRef<Path>,
+    ass_path: impl AsRef<Path>,
+    output_video: impl AsRef<Path>,
+) -> anyhow::Result<()> {
+    let ffmpeg_bin = resolve_ffmpeg_bin();
+    let sub_path = escape_filter_path(ass_path.as_ref());
+    let vf = format!("subtitles='{}'", sub_path);
+
+    let output_exec = Command::new(&ffmpeg_bin)
+        .arg("-y")
+        .arg("-i")
+        .arg(input_video.as_ref())
+        .arg("-vf")
+        .arg(vf)
+        .arg("-c:a")
+        .arg("copy")
+        .arg(output_video.as_ref())
+        .output()
+        .context("failed to execute ffmpeg for ass burn")?;
+
+    if !output_exec.status.success() {
+        let err = String::from_utf8_lossy(&output_exec.stderr);
+        bail!(
+            "ffmpeg burn ass failed. bin: {}, status: {}, stderr: {}",
+            ffmpeg_bin,
+            output_exec.status,
+            err.trim()
+        );
+    }
+
+    Ok(())
+}
+
 fn escape_filter_path(path: &Path) -> String {
     path.to_string_lossy()
         .replace('\\', "/")

@@ -14,6 +14,14 @@ struct SubtitleStyle {
     font_size: u32,
     text_color: String,
     background_color: String,
+    #[serde(default)]
+    rounded_required: bool,
+    #[serde(default = "default_rounded_radius")]
+    rounded_radius: u32,
+    #[serde(default = "default_box_padding")]
+    box_padding: u32,
+    #[serde(default = "default_bg_opacity")]
+    bg_opacity: u8,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -324,11 +332,18 @@ async fn burn_subtitles(
 ) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         let track = SubtitleTrack::from_json_file(&subtitles_json).map_err(|e| e.to_string())?;
-        let srt_path = std::env::temp_dir().join("video_cut_studio_burn.srt");
-        track.to_srt_file(&srt_path).map_err(|e| e.to_string())?;
-        let force_style = build_ass_style(&style);
-        ffmpeg::burn_subtitles(&input_video, &srt_path, &output_video, Some(&force_style))
-            .map_err(|e| e.to_string())
+        if style.rounded_required {
+            let ass_path = std::env::temp_dir().join("video_cut_studio_burn.rounded.ass");
+            let ass_content = build_rounded_ass_script(&track, &style);
+            fs::write(&ass_path, ass_content).map_err(|e| format!("写入ASS文件失败: {e}"))?;
+            ffmpeg::burn_ass_file(&input_video, &ass_path, &output_video).map_err(|e| e.to_string())
+        } else {
+            let srt_path = std::env::temp_dir().join("video_cut_studio_burn.srt");
+            track.to_srt_file(&srt_path).map_err(|e| e.to_string())?;
+            let force_style = build_ass_style(&style);
+            ffmpeg::burn_subtitles(&input_video, &srt_path, &output_video, Some(&force_style))
+                .map_err(|e| e.to_string())
+        }
     })
     .await
     .map_err(|e| format!("burn_subtitles task join failed: {e}"))?
@@ -473,7 +488,8 @@ fn build_ass_style(style: &SubtitleStyle) -> String {
         _ => 2,
     };
     let primary = hex_to_ass(&style.text_color, 0x00);
-    let back = hex_to_ass(&style.background_color, 0x88);
+    let alpha = opacity_percent_to_ass_alpha(style.bg_opacity);
+    let back = hex_to_ass(&style.background_color, alpha);
     format!(
         "Alignment={align},FontSize={},PrimaryColour={primary},BackColour={back},BorderStyle=4,Bold=1,Outline=0,Shadow=0,MarginV=24,Spacing=0",
         style.font_size
@@ -489,6 +505,127 @@ fn hex_to_ass(hex: &str, alpha: u8) -> String {
     let g = &h[2..4];
     let b = &h[4..6];
     format!("&H{alpha:02X}{}{}{}", b, g, r)
+}
+
+fn default_rounded_radius() -> u32 {
+    16
+}
+
+fn default_box_padding() -> u32 {
+    18
+}
+
+fn default_bg_opacity() -> u8 {
+    68
+}
+
+fn opacity_percent_to_ass_alpha(opacity: u8) -> u8 {
+    let v = opacity.min(100) as f32 / 100.0;
+    let alpha = 255.0 * (1.0 - v);
+    alpha.round() as u8
+}
+
+fn build_rounded_ass_script(track: &SubtitleTrack, style: &SubtitleStyle) -> String {
+    let play_res_x = 1920_i32;
+    let play_res_y = 1080_i32;
+    let font_size = style.font_size.max(20) as i32;
+    let (anchor, y, align) = match style.position.as_str() {
+        "top" => ("\\an8", 120_i32, 8_i32),
+        "center" => ("\\an5", play_res_y / 2, 5_i32),
+        _ => ("\\an2", play_res_y - 120, 2_i32),
+    };
+
+    let text_color = hex_to_ass(&style.text_color, 0x00);
+    let box_color = hex_to_ass(
+        &style.background_color,
+        opacity_percent_to_ass_alpha(style.bg_opacity),
+    );
+    let padding = style.box_padding.max(4) as i32;
+    let box_h = (font_size as f32 * 1.45) as i32 + padding * 2;
+    let radius = (style.rounded_radius.max(2) as i32).min((box_h / 2).max(2));
+
+    let mut out = String::new();
+    out.push_str("[Script Info]\n");
+    out.push_str("ScriptType: v4.00+\n");
+    out.push_str(&format!("PlayResX: {play_res_x}\nPlayResY: {play_res_y}\n"));
+    out.push_str("WrapStyle: 2\nScaledBorderAndShadow: yes\n\n");
+    out.push_str("[V4+ Styles]\n");
+    out.push_str("Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding\n");
+    out.push_str(&format!(
+        "Style: RoundedText,PingFang SC,{font_size},{text_color},&H000000FF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,0,0,{align},20,20,24,1\n"
+    ));
+    out.push_str("Style: RoundedShape,Arial,20,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,0,0,2,20,20,24,1\n\n");
+    out.push_str("[Events]\n");
+    out.push_str("Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text\n");
+
+    for seg in &track.segments {
+        let start = to_ass_time(seg.start);
+        let end = to_ass_time(seg.end);
+        let text = escape_ass_text(&seg.text);
+        let char_count = text.chars().count().max(4) as i32;
+        let box_w = ((char_count as f32 * font_size as f32 * 0.62) as i32 + padding * 2)
+            .clamp(260, play_res_x - 120);
+        let shape = rounded_box_path(box_w, box_h, radius);
+        let shape_tag = format!(
+            "{{{}\\pos({},{})\\p1\\1c{}\\bord0\\shad0}}{}",
+            anchor,
+            play_res_x / 2,
+            y,
+            box_color,
+            shape
+        );
+        let text_tag = format!(
+            "{{{}\\pos({},{})\\bord0\\shad0\\1c{}}}{}",
+            anchor,
+            play_res_x / 2,
+            y,
+            text_color,
+            text
+        );
+        out.push_str(&format!(
+            "Dialogue: 0,{start},{end},RoundedShape,,0,0,0,,{shape_tag}\n"
+        ));
+        out.push_str(&format!(
+            "Dialogue: 1,{start},{end},RoundedText,,0,0,0,,{text_tag}\n"
+        ));
+    }
+    out
+}
+
+fn rounded_box_path(width: i32, height: i32, radius: i32) -> String {
+    let w2 = width / 2;
+    let h2 = height / 2;
+    let r = radius.min(w2 - 1).min(h2 - 1).max(2);
+    let k = ((r as f32) * 0.552_284_8_f32) as i32;
+    // Centered at 0,0. ASS vector with cubic bezier.
+    format!(
+        "m {} {} l {} {} b {} {} {} {} {} {} l {} {} b {} {} {} {} {} {} l {} {} b {} {} {} {} {} {} l {} {} b {} {} {} {} {} {}",
+        -w2 + r, -h2,
+        w2 - r, -h2,
+        w2 - r + k, -h2, w2, -h2 + r - k, w2, -h2 + r,
+        w2, h2 - r,
+        w2, h2 - r + k, w2 - r + k, h2, w2 - r, h2,
+        -w2 + r, h2,
+        -w2 + r - k, h2, -w2, h2 - r + k, -w2, h2 - r,
+        -w2, -h2 + r,
+        -w2, -h2 + r - k, -w2 + r - k, -h2, -w2 + r, -h2
+    )
+}
+
+fn to_ass_time(sec: f32) -> String {
+    let total_cs = (sec.max(0.0) * 100.0).round() as i64;
+    let h = total_cs / 360000;
+    let m = (total_cs % 360000) / 6000;
+    let s = (total_cs % 6000) / 100;
+    let cs = total_cs % 100;
+    format!("{h}:{m:02}:{s:02}.{cs:02}")
+}
+
+fn escape_ass_text(s: &str) -> String {
+    s.replace('\\', r"\\")
+        .replace('{', r"\{")
+        .replace('}', r"\}")
+        .replace('\n', r"\N")
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

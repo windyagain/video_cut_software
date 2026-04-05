@@ -6,6 +6,10 @@ type SubtitleStyle = {
   fontSize: number;
   textColor: string;
   backgroundColor: string;
+  roundedRequired: boolean;
+  roundedRadius: number;
+  boxPadding: number;
+  bgOpacity: number;
 };
 
 type ProjectConfig = {
@@ -110,6 +114,10 @@ function readSubtitleStyle(): SubtitleStyle {
     fontSize: Number(el<HTMLInputElement>("fontSize").value || 17),
     textColor: el<HTMLInputElement>("textColor").value,
     backgroundColor: el<HTMLInputElement>("bgColor").value,
+    roundedRequired: el<HTMLInputElement>("roundedRequired").checked,
+    roundedRadius: Number(el<HTMLInputElement>("roundedRadius").value || 16),
+    boxPadding: Number(el<HTMLInputElement>("boxPadding").value || 18),
+    bgOpacity: Number(el<HTMLInputElement>("bgOpacity").value || 68),
   };
 }
 
@@ -117,7 +125,14 @@ function applySubtitleStyleToOverlay(style: SubtitleStyle) {
   const overlay = el<HTMLDivElement>("subtitleOverlay");
   overlay.style.fontSize = `${Math.max(12, style.fontSize)}px`;
   overlay.style.color = style.textColor;
-  overlay.style.backgroundColor = `${style.backgroundColor}73`;
+  const opacity = Math.min(100, Math.max(0, style.bgOpacity)) / 100;
+  const hex = style.backgroundColor.replace("#", "");
+  const r = parseInt(hex.slice(0, 2), 16) || 0;
+  const g = parseInt(hex.slice(2, 4), 16) || 0;
+  const b = parseInt(hex.slice(4, 6), 16) || 0;
+  overlay.style.backgroundColor = `rgba(${r}, ${g}, ${b}, ${opacity.toFixed(2)})`;
+  overlay.style.padding = `${Math.max(4, style.boxPadding)}px ${Math.max(8, Math.round(style.boxPadding * 1.3))}px`;
+  overlay.style.borderRadius = `${Math.max(2, style.roundedRadius)}px`;
   overlay.style.top = "";
   overlay.style.bottom = "";
   overlay.style.transform = "translateX(-50%)";
@@ -279,6 +294,10 @@ function setProject(project: ProjectConfig) {
   el<HTMLInputElement>("fontSize").value = String(project.subtitleStyle?.fontSize || 17);
   el<HTMLInputElement>("textColor").value = project.subtitleStyle?.textColor || "#ffe200";
   el<HTMLInputElement>("bgColor").value = project.subtitleStyle?.backgroundColor || "#000000";
+  el<HTMLInputElement>("roundedRequired").checked = Boolean(project.subtitleStyle?.roundedRequired);
+  el<HTMLInputElement>("roundedRadius").value = String(project.subtitleStyle?.roundedRadius ?? 16);
+  el<HTMLInputElement>("boxPadding").value = String(project.subtitleStyle?.boxPadding ?? 18);
+  el<HTMLInputElement>("bgOpacity").value = String(project.subtitleStyle?.bgOpacity ?? 68);
   fillDerivedPaths();
   setupVideoSource(project.inputVideo);
   setOverlayEnabled(true);
@@ -523,6 +542,10 @@ function bind() {
       log(`参数: inputVideo=${p.inputVideo}`);
       log(`参数: subtitles=${subtitleForBurn}`);
       log(`参数: outputVideo=${outputVideo}`);
+      log(`参数: roundedRequired=${p.subtitleStyle.roundedRequired}`);
+      log(
+        `参数: roundedRadius=${p.subtitleStyle.roundedRadius}, boxPadding=${p.subtitleStyle.boxPadding}, bgOpacity=${p.subtitleStyle.bgOpacity}`,
+      );
       await invoke("burn_subtitles", {
         inputVideo: p.inputVideo,
         subtitlesJson: subtitleForBurn,
@@ -625,7 +648,7 @@ function bind() {
     applySubtitleStyleToOverlay(style);
     syncStylePanelPreview(style);
   };
-  ["position", "fontSize", "textColor", "bgColor"].forEach((id) => {
+  ["position", "fontSize", "textColor", "bgColor", "roundedRequired", "roundedRadius", "boxPadding", "bgOpacity"].forEach((id) => {
     const node = el<HTMLElement>(id);
     node.addEventListener("input", onStyleChanged);
     node.addEventListener("change", onStyleChanged);

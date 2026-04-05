@@ -101,6 +101,21 @@
               </span>
             </label>
           </div>
+          <label class="style-field">
+            <input id="roundedRequired" type="checkbox" />
+            必须圆角（新路线烧录）
+          </label>
+          <div class="style-compact-row">
+            <label class="style-compact-item">圆角
+              <input id="roundedRadius" type="number" min="2" max="80" step="1" value="16" />
+            </label>
+            <label class="style-compact-item">内边距
+              <input id="boxPadding" type="number" min="4" max="80" step="1" value="18" />
+            </label>
+            <label class="style-compact-item">透明度%
+              <input id="bgOpacity" type="number" min="0" max="100" step="1" value="68" />
+            </label>
+          </div>
           <p class="muted">当前样式先作为项目配置保存，导出渲染下一步接入。</p>
         </section>
 
