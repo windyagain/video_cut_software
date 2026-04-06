@@ -98,10 +98,21 @@ pub fn burn_subtitles(
     output_video: impl AsRef<Path>,
     force_style: Option<&str>,
 ) -> anyhow::Result<()> {
+    burn_subtitles_with_options(input_video, srt_path, output_video, force_style, None, None)
+}
+
+pub fn burn_subtitles_with_options(
+    input_video: impl AsRef<Path>,
+    srt_path: impl AsRef<Path>,
+    output_video: impl AsRef<Path>,
+    force_style: Option<&str>,
+    resolution: Option<(u32, u32)>,
+    video_bitrate: Option<&str>,
+) -> anyhow::Result<()> {
     let ffmpeg_bin = resolve_ffmpeg_bin();
     let sub_path = escape_filter_path(srt_path.as_ref());
 
-    let vf = if let Some(style) = force_style {
+    let mut vf = if let Some(style) = force_style {
         if style.trim().is_empty() {
             format!("subtitles='{}'", sub_path)
         } else {
@@ -111,15 +122,28 @@ pub fn burn_subtitles(
     } else {
         format!("subtitles='{}'", sub_path)
     };
+    if let Some((w, h)) = resolution {
+        vf.push_str(&format!(",scale={w}:{h}"));
+    }
 
-    let output_exec = Command::new(&ffmpeg_bin)
-        .arg("-y")
+    let mut cmd = Command::new(&ffmpeg_bin);
+    cmd.arg("-y")
         .arg("-i")
         .arg(input_video.as_ref())
         .arg("-vf")
         .arg(vf)
+        .arg("-c:v")
+        .arg("libx264")
+        .arg("-preset")
+        .arg("veryfast")
         .arg("-c:a")
-        .arg("copy")
+        .arg("aac")
+        .arg("-b:a")
+        .arg("192k");
+    if let Some(br) = video_bitrate.filter(|s| !s.trim().is_empty()) {
+        cmd.arg("-b:v").arg(br.trim());
+    }
+    let output_exec = cmd
         .arg(output_video.as_ref())
         .output()
         .context("failed to execute ffmpeg for subtitle burn")?;
@@ -142,18 +166,41 @@ pub fn burn_ass_file(
     ass_path: impl AsRef<Path>,
     output_video: impl AsRef<Path>,
 ) -> anyhow::Result<()> {
+    burn_ass_file_with_options(input_video, ass_path, output_video, None, None)
+}
+
+pub fn burn_ass_file_with_options(
+    input_video: impl AsRef<Path>,
+    ass_path: impl AsRef<Path>,
+    output_video: impl AsRef<Path>,
+    resolution: Option<(u32, u32)>,
+    video_bitrate: Option<&str>,
+) -> anyhow::Result<()> {
     let ffmpeg_bin = resolve_ffmpeg_bin();
     let sub_path = escape_filter_path(ass_path.as_ref());
-    let vf = format!("subtitles='{}'", sub_path);
+    let mut vf = format!("subtitles='{}'", sub_path);
+    if let Some((w, h)) = resolution {
+        vf.push_str(&format!(",scale={w}:{h}"));
+    }
 
-    let output_exec = Command::new(&ffmpeg_bin)
-        .arg("-y")
+    let mut cmd = Command::new(&ffmpeg_bin);
+    cmd.arg("-y")
         .arg("-i")
         .arg(input_video.as_ref())
         .arg("-vf")
         .arg(vf)
+        .arg("-c:v")
+        .arg("libx264")
+        .arg("-preset")
+        .arg("veryfast")
         .arg("-c:a")
-        .arg("copy")
+        .arg("aac")
+        .arg("-b:a")
+        .arg("192k");
+    if let Some(br) = video_bitrate.filter(|s| !s.trim().is_empty()) {
+        cmd.arg("-b:v").arg(br.trim());
+    }
+    let output_exec = cmd
         .arg(output_video.as_ref())
         .output()
         .context("failed to execute ffmpeg for ass burn")?;

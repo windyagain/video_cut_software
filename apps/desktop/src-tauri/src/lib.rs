@@ -1,8 +1,10 @@
 use rfd::FileDialog;
 use serde::{Deserialize, Serialize};
+use std::io::{BufRead, BufReader};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use tauri::{Emitter, Manager};
 use video_engine::siliconflow::SiliconFlowClient;
 use video_engine::subtitle::SubtitleTrack;
 use video_engine::{asr, ffmpeg};
@@ -34,8 +36,12 @@ struct ProjectConfig {
     #[serde(default)]
     rendered_video: String,
     audio_wav: String,
-    whisper_bin: String,
-    whisper_model: String,
+    #[serde(default)]
+    tool_api_origin: String,
+    #[serde(default)]
+    dashscope_api_key: String,
+    #[serde(default)]
+    asr_model: String,
     whisper_json: String,
     subtitles_json: String,
     corrected_json: String,
@@ -64,6 +70,13 @@ struct CorrectionRuntimeConfig {
     max_tokens: u32,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AsrRuntimeConfig {
+    api_origin: String,
+    dashscope_api_key: String,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct BatchCorrectedItem {
     index: usize,
@@ -73,6 +86,20 @@ struct BatchCorrectedItem {
 #[derive(Debug, Clone, Deserialize)]
 struct BatchCorrectedOutput {
     items: Vec<BatchCorrectedItem>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExportResult {
+    route: String,
+    output: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExportProgressPayload {
+    percent: u32,
+    text: String,
 }
 
 fn first_existing(candidates: &[&str]) -> Option<String> {
@@ -122,11 +149,46 @@ fn correction_model() -> String {
         .unwrap_or_else(|_| "Pro/Qwen/Qwen2.5-7B-Instruct".to_string())
 }
 
+fn asr_api_origin() -> String {
+    std::env::var("TOOL_AUDIO_ASR_ORIGIN")
+        .or_else(|_| std::env::var("TOOL_API_ORIGIN"))
+        .unwrap_or_else(|_| "http://101.34.207.228:81".to_string())
+}
+
+fn resolve_dashscope_api_key() -> Option<String> {
+    let _ = dotenvy::dotenv();
+    let mut paths = Vec::<PathBuf>::new();
+    if let Ok(home) = std::env::var("HOME") {
+        paths.push(PathBuf::from(&home).join(".env"));
+        paths.push(PathBuf::from(home).join(".video_cut_studio").join(".env"));
+    }
+    paths.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.env"));
+    for path in paths {
+        if path.exists() {
+            let _ = dotenvy::from_path(path);
+        }
+    }
+    std::env::var("DASHSCOPE_API_KEY")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 fn default_download_dir() -> PathBuf {
     std::env::var("HOME")
         .map(PathBuf::from)
         .map(|p| p.join("Downloads"))
         .unwrap_or_else(|_| PathBuf::from("."))
+}
+
+fn resolve_ffmpeg_bin() -> String {
+    first_existing(&[
+        "/opt/homebrew/bin/ffmpeg",
+        "/usr/local/bin/ffmpeg",
+        "/usr/bin/ffmpeg",
+    ])
+        .or_else(|| std::env::var("FFMPEG_BIN").ok())
+        .unwrap_or_else(|| "ffmpeg".to_string())
 }
 
 fn sanitize_file_stem(name: &str) -> String {
@@ -267,6 +329,23 @@ fn pick_subtitle_file() -> Option<String> {
 }
 
 #[tauri::command]
+fn pick_export_file(suggested_path: Option<String>) -> Option<String> {
+    let mut dialog = FileDialog::new().add_filter("video", &["mp4"]);
+    if let Some(path) = suggested_path.filter(|s| !s.trim().is_empty()) {
+        let p = PathBuf::from(path);
+        if let Some(parent) = p.parent() {
+            dialog = dialog.set_directory(parent);
+        }
+        if let Some(name) = p.file_name().and_then(|s| s.to_str()) {
+            dialog = dialog.set_file_name(name);
+        }
+    }
+    dialog
+        .save_file()
+        .map(|p| p.to_string_lossy().to_string())
+}
+
+#[tauri::command]
 fn suggest_project_path(input_video: Option<String>) -> Result<String, String> {
     let base_name = input_video
         .as_deref()
@@ -288,6 +367,14 @@ fn get_correction_runtime_config() -> CorrectionRuntimeConfig {
         batch_size: correction_batch_size(),
         concurrency: correction_concurrency(),
         max_tokens: correction_max_tokens(),
+    }
+}
+
+#[tauri::command]
+fn get_asr_runtime_config() -> AsrRuntimeConfig {
+    AsrRuntimeConfig {
+        api_origin: asr_api_origin(),
+        dashscope_api_key: resolve_dashscope_api_key().unwrap_or_default(),
     }
 }
 
@@ -330,54 +417,187 @@ async fn strip_audio(input: String) -> Result<String, String> {
 
 #[tauri::command]
 async fn transcribe_audio(
-    whisper_bin: String,
-    model: String,
+    dashscope_api_key: String,
+    asr_model: String,
     wav: String,
     whisper_json: String,
-    language: String,
     subtitles_out: String,
 ) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        asr::transcribe_with_whisper_cpp(&whisper_bin, &model, &wav, &whisper_json, &language)
-            .map_err(|e| e.to_string())?;
-        let track =
-            asr::load_whisper_json_to_track(&whisper_json, &language).map_err(|e| e.to_string())?;
-        track.to_json_file(&subtitles_out).map_err(|e| e.to_string())
-    })
+    let final_api_origin = asr_api_origin();
+    let final_api_key = if dashscope_api_key.trim().is_empty() {
+        resolve_dashscope_api_key().unwrap_or_default()
+    } else {
+        dashscope_api_key.trim().to_string()
+    };
+    if final_api_key.is_empty() {
+        return Err("请填写 DASHSCOPE_API_KEY".to_string());
+    }
+    let (raw_body, track) = asr::transcribe_with_tool_asr(
+        &final_api_origin,
+        &wav,
+        &final_api_key,
+        &asr_model,
+    )
     .await
-    .map_err(|e| format!("transcribe_audio task join failed: {e}"))?
+    .map_err(|e| e.to_string())?;
+    fs::write(&whisper_json, raw_body).map_err(|e| e.to_string())?;
+    track.to_json_file(&subtitles_out).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 async fn burn_subtitles(
+    app: tauri::AppHandle,
     input_video: String,
     subtitles_json: String,
     output_video: String,
     style: SubtitleStyle,
 ) -> Result<String, String> {
+    export_subtitled_video(app, input_video, subtitles_json, output_video, "source".to_string(), "6M".to_string(), style)
+        .await
+        .map(|r| r.route)
+}
+
+fn parse_resolution(resolution: &str) -> Option<(u32, u32)> {
+    let r = resolution.trim().to_ascii_lowercase();
+    if r.is_empty() || r == "source" {
+        return None;
+    }
+    let mut parts = r.split('x');
+    let w = parts.next()?.parse::<u32>().ok()?;
+    let h = parts.next()?.parse::<u32>().ok()?;
+    if w > 0 && h > 0 { Some((w, h)) } else { None }
+}
+
+fn emit_export_progress(app: &tauri::AppHandle, percent: u32, text: &str) {
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.emit(
+            "export-progress",
+            ExportProgressPayload {
+                percent: percent.min(100),
+                text: text.to_string(),
+            },
+        );
+    }
+}
+
+fn burn_video_with_progress(
+    app: &tauri::AppHandle,
+    input_video: &str,
+    output_video: &str,
+    vf: String,
+    video_bitrate: Option<&str>,
+) -> Result<(), String> {
+    let total_duration = probe_video_duration(input_video).unwrap_or(0.0);
+    let ffmpeg_bin = resolve_ffmpeg_bin();
+    let mut cmd = Command::new(&ffmpeg_bin);
+    cmd.arg("-y")
+        .arg("-i")
+        .arg(input_video)
+        .arg("-vf")
+        .arg(vf)
+        .arg("-c:v")
+        .arg("libx264")
+        .arg("-preset")
+        .arg("veryfast")
+        .arg("-c:a")
+        .arg("aac")
+        .arg("-b:a")
+        .arg("192k")
+        .arg("-progress")
+        .arg("pipe:2")
+        .arg("-nostats");
+    if let Some(br) = video_bitrate.filter(|s| !s.trim().is_empty()) {
+        cmd.arg("-b:v").arg(br.trim());
+    }
+    let mut child = cmd
+        .arg(output_video)
+        .stderr(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("启动 ffmpeg 导出失败: {e}"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "无法读取 ffmpeg 导出进度".to_string())?;
+    emit_export_progress(app, 2, "开始导出");
+    let reader = BufReader::new(stderr);
+    for line in reader.lines() {
+        let line = line.unwrap_or_default();
+        if let Some(ms) = line.strip_prefix("out_time_ms=") {
+            if let Ok(out_time_ms) = ms.trim().parse::<f64>() {
+                if total_duration > 0.0 {
+                    let seconds = out_time_ms / 1_000_000.0;
+                    let percent = ((seconds / total_duration) * 100.0).round() as u32;
+                    emit_export_progress(app, percent.min(99), &format!("导出中 {}%", percent.min(99)));
+                }
+            }
+        } else if line == "progress=end" {
+            emit_export_progress(app, 100, "导出完成");
+        }
+    }
+    let status = child.wait().map_err(|e| format!("等待 ffmpeg 结束失败: {e}"))?;
+    if !status.success() {
+        return Err(format!("ffmpeg 导出失败: status={status}"));
+    }
+    emit_export_progress(app, 100, "导出完成");
+    Ok(())
+}
+
+#[tauri::command]
+async fn export_subtitled_video(
+    app: tauri::AppHandle,
+    input_video: String,
+    subtitles_json: String,
+    output_video: String,
+    resolution: String,
+    bitrate: String,
+    style: SubtitleStyle,
+) -> Result<ExportResult, String> {
+    emit_export_progress(&app, 0, "准备导出");
     tauri::async_runtime::spawn_blocking(move || {
         let track = SubtitleTrack::from_json_file(&subtitles_json).map_err(|e| e.to_string())?;
+        let target_res = parse_resolution(&resolution);
+        let target_bitrate = bitrate.trim().to_string();
         if style.rounded_required {
             let ass_path = std::env::temp_dir().join("video_cut_studio_burn.rounded.ass");
             let ass_content = build_rounded_ass_script(&track, &style, &input_video);
             fs::write(&ass_path, ass_content).map_err(|e| format!("写入ASS文件失败: {e}"))?;
-            ffmpeg::burn_ass_file(&input_video, &ass_path, &output_video)
-                .map_err(|e| e.to_string())?;
-            Ok(format!(
-                "route=rounded_ass, ass_path={}",
-                ass_path.to_string_lossy()
-            ))
+            burn_video_with_progress(
+                &app,
+                &input_video,
+                &output_video,
+                format!("subtitles='{}'{}", escape_filter_path(&ass_path), target_res.map(|(w, h)| format!(",scale={w}:{h}")).unwrap_or_default()),
+                Some(target_bitrate.as_str()),
+            )?;
+            Ok(ExportResult {
+                route: format!("route=rounded_ass, ass_path={}", ass_path.to_string_lossy()),
+                output: output_video,
+            })
         } else {
             let srt_path = std::env::temp_dir().join("video_cut_studio_burn.srt");
             track.to_srt_file(&srt_path).map_err(|e| e.to_string())?;
             let force_style = build_ass_style(&style);
-            ffmpeg::burn_subtitles(&input_video, &srt_path, &output_video, Some(&force_style))
-                .map_err(|e| e.to_string())?;
-            Ok(format!("route=legacy_srt, srt_path={}", srt_path.to_string_lossy()))
+            let sub_path = escape_filter_path(&srt_path);
+            let escaped_style = force_style.replace('\'', "\\'");
+            let mut vf = format!("subtitles='{}':force_style='{}'", sub_path, escaped_style);
+            if let Some((w, h)) = target_res {
+                vf.push_str(&format!(",scale={w}:{h}"));
+            }
+            burn_video_with_progress(
+                &app,
+                &input_video,
+                &output_video,
+                vf,
+                Some(target_bitrate.as_str()),
+            )?;
+            Ok(ExportResult {
+                route: format!("route=legacy_srt, srt_path={}", srt_path.to_string_lossy()),
+                output: output_video,
+            })
         }
     })
     .await
-    .map_err(|e| format!("burn_subtitles task join failed: {e}"))?
+    .map_err(|e| format!("export_subtitled_video task join failed: {e}"))?
 }
 
 #[tauri::command]
@@ -408,7 +628,7 @@ async fn correct_subtitles(
     let mut new_track = track.clone();
     for item in corrected {
         if let Some(seg) = new_track.segments.get_mut(item.index) {
-            seg.text = item.corrected_text;
+            seg.text = sanitize_corrected_text(&seg.text, &item.corrected_text);
         }
     }
 
@@ -474,10 +694,11 @@ fn correct_subtitles_batch(
     let mut applied = 0usize;
     for item in corrected.items {
         if let Some(seg) = track.segments.get_mut(item.index) {
-            if seg.text != item.corrected_text {
+            let next_text = sanitize_corrected_text(&seg.text, &item.corrected_text);
+            if seg.text != next_text {
                 applied += 1;
             }
-            seg.text = item.corrected_text;
+            seg.text = next_text;
         }
     }
 
@@ -525,6 +746,27 @@ fn build_ass_style(style: &SubtitleStyle) -> String {
         "Alignment={align},FontSize={},PrimaryColour={primary},BackColour={back},BorderStyle=4,Bold=1,Outline=0,Shadow=0,MarginV=24,Spacing=0",
         style.font_size
     )
+}
+
+fn normalize_inline_text(raw: &str) -> String {
+    raw.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn sanitize_corrected_text(original: &str, corrected: &str) -> String {
+    let original_n = normalize_inline_text(original);
+    let corrected_n = normalize_inline_text(corrected);
+    if corrected_n.is_empty() {
+        return original_n;
+    }
+    let original_len = original_n.chars().count();
+    let corrected_len = corrected_n.chars().count();
+    if original_len > 0 {
+        let grow_limit = ((original_len as f32) * 1.35).ceil() as usize;
+        if corrected_len > grow_limit && corrected_len > original_len + 8 {
+            return original_n;
+        }
+    }
+    corrected_n
 }
 
 fn hex_to_ass(hex: &str, alpha: u8) -> String {
@@ -674,6 +916,38 @@ fn probe_video_size(input_video: &str) -> Option<(i32, i32)> {
     if w > 0 && h > 0 { Some((w, h)) } else { None }
 }
 
+fn probe_video_duration(input_video: &str) -> Option<f64> {
+    let ffprobe = first_existing(&[
+        "/opt/homebrew/bin/ffprobe",
+        "/usr/local/bin/ffprobe",
+        "/usr/bin/ffprobe",
+    ])?;
+    let out = Command::new(ffprobe)
+        .arg("-v")
+        .arg("error")
+        .arg("-show_entries")
+        .arg("format=duration")
+        .arg("-of")
+        .arg("default=noprint_wrappers=1:nokey=1")
+        .arg(input_video)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&out.stdout).trim().parse::<f64>().ok()
+}
+
+fn escape_filter_path(path: &Path) -> String {
+    path.to_string_lossy()
+        .replace('\\', "/")
+        .replace(':', "\\:")
+        .replace(',', "\\,")
+        .replace('[', "\\[")
+        .replace(']', "\\]")
+        .replace('\'', "\\'")
+}
+
 fn rounded_box_path(width: i32, height: i32, radius: i32) -> String {
     let r = radius.min((width / 2).saturating_sub(1)).min((height / 2).saturating_sub(1)).max(2);
     let k = ((r as f32) * 0.552_284_8_f32) as i32;
@@ -732,12 +1006,44 @@ fn escape_ass_text(s: &str) -> String {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .setup(|app| {
+            use tauri::menu::{MenuBuilder, MenuItem, SubmenuBuilder};
+            let handle = app.handle();
+            let export_item = MenuItem::with_id(app, "menu_export", "导出", true, None::<&str>)?;
+            let file_menu = SubmenuBuilder::new(handle, "文件")
+                .item(&export_item)
+                .build()?;
+            let edit_menu = SubmenuBuilder::new(handle, "编辑")
+                .undo()
+                .redo()
+                .separator()
+                .cut()
+                .copy()
+                .paste()
+                .select_all()
+                .build()?;
+            let menu = MenuBuilder::new(handle)
+                .item(&file_menu)
+                .item(&edit_menu)
+                .build()?;
+            app.set_menu(menu)?;
+            Ok(())
+        })
+        .on_menu_event(|app, event| {
+            if event.id().as_ref() == "menu_export" {
+                if let Some(win) = app.get_webview_window("main") {
+                    let _ = win.emit("menu-export", ());
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             pick_video_file,
             pick_reference_file,
             pick_subtitle_file,
+            pick_export_file,
             suggest_project_path,
             get_correction_runtime_config,
+            get_asr_runtime_config,
             detect_local_setup,
             install_local_whisper_base,
             cut_video,
@@ -745,6 +1051,7 @@ pub fn run() {
             strip_audio,
             transcribe_audio,
             burn_subtitles,
+            export_subtitled_video,
             correct_subtitles,
             correct_subtitles_batch,
             load_subtitles,

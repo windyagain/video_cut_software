@@ -23,10 +23,8 @@
         </div>
 
         <div class="left-section compact">
-          <h3>本地转写引擎</h3>
-          <button id="btnDetectWhisper">检测环境</button>
-          <button id="btnInstallWhisper" class="primary">一键安装转写引擎</button>
-          <div id="setupStatus" class="muted">未检测</div>
+          <h3>云端 ASR</h3>
+          <div class="muted">使用你提供的 /tool/audio_asr 接口进行语音转文字</div>
         </div>
       </aside>
 
@@ -34,12 +32,12 @@
         <header class="topbar">
           <div>
             <h1>本地视频处理</h1>
-            <p>生成字幕（抽音频+转写+纠正） -> 手动烧录</p>
+            <p>生成字幕（抽音频+转写+纠正） -> 导出成片</p>
           </div>
           <div class="topbar-actions">
             <button id="btnGenerateSubtitles" class="primary">1. 生成字幕</button>
-            <button id="btnBurn">2. 手动烧录字幕</button>
-            <button id="btnStripAudio">3. 剥离音频文件</button>
+            <button id="btnExport">2. 导出</button>
+            <button id="btnStripAudio">3. 剥离音频</button>
           </div>
         </header>
 
@@ -49,12 +47,6 @@
             <video id="previewVideo" controls preload="metadata"></video>
             <div id="subtitleOverlay" class="subtitle-overlay"></div>
           </div>
-        </div>
-
-        <div class="project-row">
-          <input id="projectPath" placeholder="项目路径: /path/project.json" />
-          <button id="btnSave">保存项目</button>
-          <button id="btnLoad">加载项目</button>
         </div>
 
         <pre id="log"></pre>
@@ -71,7 +63,6 @@
           <div class="subtitle-toolbar">
             <button id="loadExternalSubtitles">加载外部字幕</button>
             <button id="loadOriginalSubtitles">加载识别字幕</button>
-            <button id="loadCorrectedSubtitles">加载纠正字幕</button>
             <button id="saveEditedSubtitles" class="primary">保存当前字幕</button>
           </div>
           <div id="subtitleList" class="subtitle-list"></div>
@@ -124,11 +115,11 @@
         </section>
 
         <section class="tab-panel" data-tab="advanced">
-          <label>whisper 可执行文件 <input id="whisperBin" placeholder="/path/whisper-cli" /></label>
-          <label>whisper 模型 <input id="whisperModel" placeholder="/path/ggml-base.bin" /></label>
+          <label>DASHSCOPE_API_KEY <input id="dashscopeApiKey" placeholder="请输入百炼 API Key" /></label>
+          <label>ASR模型 <input id="asrModel" value="fun-asr" /></label>
           <label>语言 <input id="language" value="zh" /></label>
           <label>音频输出 <input id="audioWav" placeholder="/path/clip.wav" /></label>
-          <label>whisper 原始 JSON <input id="whisperJson" placeholder="/path/asr.raw.json" /></label>
+          <label>ASR 原始 JSON <input id="whisperJson" placeholder="/path/asr.raw.json" /></label>
           <label>字幕 JSON <input id="subtitlesJson" placeholder="/path/asr.json" /></label>
           <label>纠正后字幕 JSON <input id="correctedJson" placeholder="/path/asr.corrected.json" /></label>
           <label>烧录输出视频 <input id="renderedVideo" placeholder="/path/output.subtitled.mp4" /></label>
@@ -138,5 +129,49 @@
         </section>
       </aside>
     </main>
+
+    <div id="exportModal" class="modal hidden" aria-hidden="true">
+      <div class="modal-panel">
+        <div class="modal-head">
+          <h3>导出设置</h3>
+          <button id="closeExportModal" class="ghost">关闭</button>
+        </div>
+        <div class="modal-body">
+          <label>导出路径
+            <div class="inline-row">
+              <input id="exportPath" placeholder="/path/output.subtitled.mp4" />
+              <button id="pickExportPath">选择</button>
+            </div>
+          </label>
+          <div class="inline-row">
+            <label>分辨率
+              <select id="exportResolution">
+                <option value="source">保持原分辨率</option>
+                <option value="3840x2160">4K (3840x2160)</option>
+                <option value="2560x1440">2K (2560x1440)</option>
+                <option value="1920x1080">1080p</option>
+                <option value="1280x720">720p</option>
+              </select>
+            </label>
+            <label>码率
+              <input id="exportBitrate" value="6M" />
+            </label>
+          </div>
+          <div id="exportProgressBox" class="export-progress-box hidden">
+            <div class="export-progress-head">
+              <span>导出进度</span>
+              <span id="exportProgressText">0%</span>
+            </div>
+            <div class="export-progress-track">
+              <div id="exportProgressBar" class="export-progress-bar"></div>
+            </div>
+          </div>
+          <p class="muted">导出将按当前字幕内容与样式直接烧录。</p>
+        </div>
+        <div class="modal-foot">
+          <button id="confirmExport" class="primary">开始导出</button>
+        </div>
+      </div>
+    </div>
   </body>
 </html>

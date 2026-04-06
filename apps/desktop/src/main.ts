@@ -1,4 +1,5 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import "./styles.css";
 
 type SubtitleStyle = {
@@ -18,8 +19,9 @@ type ProjectConfig = {
   clippedVideo: string;
   renderedVideo: string;
   audioWav: string;
-  whisperBin: string;
-  whisperModel: string;
+  toolApiOrigin: string;
+  dashscopeApiKey: string;
+  asrModel: string;
   whisperJson: string;
   subtitlesJson: string;
   correctedJson: string;
@@ -41,18 +43,26 @@ type SubtitleTrack = {
   segments: SubtitleSegment[];
 };
 
-type LocalSetup = {
-  ffmpegBin?: string | null;
-  whisperBin?: string | null;
-  whisperModel?: string | null;
-  message: string;
-};
-
 type CorrectionRuntimeConfig = {
   model: string;
   batchSize: number;
   concurrency: number;
   maxTokens: number;
+};
+
+type AsrRuntimeConfig = {
+  apiOrigin: string;
+  dashscopeApiKey: string;
+};
+
+type ExportProgressPayload = {
+  percent: number;
+  text: string;
+};
+
+type ExportResult = {
+  route: string;
+  output: string;
 };
 
 const el = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -97,16 +107,53 @@ async function step(name: string, fn: () => Promise<void>) {
 }
 
 function setOverlayText(text: string) {
-  el<HTMLDivElement>("subtitleOverlay").textContent = overlayEnabled ? text || "" : "";
+  const overlay = el<HTMLDivElement>("subtitleOverlay");
+  const content = overlayEnabled ? (text || "").replace(/\s+/g, " ").trim() : "";
+  overlay.textContent = content;
+  overlay.style.visibility = content ? "visible" : "hidden";
+  if (!content) return;
+  requestAnimationFrame(() => fitOverlayByVideoWidth(content));
 }
 
 function setOverlayEnabled(enabled: boolean) {
   overlayEnabled = enabled;
   const overlay = el<HTMLDivElement>("subtitleOverlay");
   overlay.style.display = enabled ? "block" : "none";
+  overlay.style.visibility = enabled ? "visible" : "hidden";
   if (!enabled) {
     overlay.textContent = "";
   }
+}
+
+function showExportModal() {
+  const modal = el<HTMLDivElement>("exportModal");
+  modal.classList.remove("hidden");
+  modal.setAttribute("aria-hidden", "false");
+}
+
+function hideExportModal() {
+  const modal = el<HTMLDivElement>("exportModal");
+  modal.classList.add("hidden");
+  modal.setAttribute("aria-hidden", "true");
+}
+
+function setExportProgress(percent: number, text?: string) {
+  const box = el<HTMLDivElement>("exportProgressBox");
+  const bar = el<HTMLDivElement>("exportProgressBar");
+  const label = el<HTMLSpanElement>("exportProgressText");
+  box.classList.remove("hidden");
+  const value = Math.max(0, Math.min(100, Math.round(percent)));
+  bar.style.width = `${value}%`;
+  label.textContent = text?.trim() || `${value}%`;
+}
+
+function resetExportProgress() {
+  const box = el<HTMLDivElement>("exportProgressBox");
+  const bar = el<HTMLDivElement>("exportProgressBar");
+  const label = el<HTMLSpanElement>("exportProgressText");
+  box.classList.add("hidden");
+  bar.style.width = "0%";
+  label.textContent = "0%";
 }
 
 function readSubtitleStyle(): SubtitleStyle {
@@ -139,15 +186,49 @@ function applySubtitleStyleToOverlay(style: SubtitleStyle) {
   overlay.style.borderRadius = `${Math.max(2, style.roundedRadius)}px`;
   overlay.style.top = "";
   overlay.style.bottom = "";
-  overlay.style.transform = "translateX(-50%)";
+  overlay.style.transform = "translateX(-50%) scale(var(--overlay-scale, 1))";
+  overlay.style.transformOrigin = "center bottom";
   if (style.position === "top") {
     overlay.style.top = "36px";
+    overlay.style.transformOrigin = "center top";
   } else if (style.position === "center") {
     overlay.style.top = "50%";
-    overlay.style.transform = "translate(-50%, -50%)";
+    overlay.style.transform = "translate(-50%, -50%) scale(var(--overlay-scale, 1))";
+    overlay.style.transformOrigin = "center center";
   } else {
     overlay.style.bottom = "36px";
   }
+  const content = (overlay.textContent || "").trim();
+  if (content) {
+    requestAnimationFrame(() => fitOverlayByVideoWidth(content));
+  }
+}
+
+function fitOverlayByVideoWidth(content: string) {
+  const overlay = el<HTMLDivElement>("subtitleOverlay");
+  const video = el<HTMLVideoElement>("previewVideo");
+  const videoWidth = video.clientWidth || 0;
+  if (!videoWidth || !content) {
+    overlay.style.setProperty("--overlay-scale", "1");
+    return;
+  }
+  const computed = getComputedStyle(overlay);
+  const font = computed.font || `${computed.fontWeight} ${computed.fontSize} ${computed.fontFamily}`;
+  const canvas = document.createElement("canvas");
+  const ctx = canvas.getContext("2d");
+  if (!ctx) {
+    overlay.style.setProperty("--overlay-scale", "1");
+    return;
+  }
+  ctx.font = font;
+  const textWidth = ctx.measureText(content).width;
+  const padLeft = parseFloat(computed.paddingLeft || "0") || 0;
+  const padRight = parseFloat(computed.paddingRight || "0") || 0;
+  const requiredWidth = textWidth + padLeft + padRight;
+  const maxWidth = Math.max(160, videoWidth * 0.9);
+  const ratio = maxWidth / Math.max(requiredWidth, 1);
+  const scale = Math.min(1, Math.max(0.58, ratio));
+  overlay.style.setProperty("--overlay-scale", scale.toFixed(3));
 }
 
 function syncStylePanelPreview(style: SubtitleStyle) {
@@ -160,15 +241,10 @@ function syncStylePanelPreview(style: SubtitleStyle) {
 }
 
 function setActiveSegment(index: number, scroll = false) {
-  if (activeSegmentIndex === index) return;
-  const prev = document.querySelector(`.segment-item[data-index="${activeSegmentIndex}"]`) as HTMLElement | null;
-  if (prev) prev.classList.remove("active");
   activeSegmentIndex = index;
+  if (index < 0) return;
   const cur = document.querySelector(`.segment-item[data-index="${activeSegmentIndex}"]`) as HTMLElement | null;
-  if (cur) {
-    cur.classList.add("active");
-    if (scroll) cur.scrollIntoView({ block: "nearest" });
-  }
+  if (cur && scroll) cur.scrollIntoView({ block: "nearest" });
 }
 
 function syncSubtitleByPlayerTime(scroll = false) {
@@ -239,6 +315,8 @@ function setupVideoSource(path: string) {
   player.onloadedmetadata = () => {
     log(`预览已加载: ${(player.duration || 0).toFixed(2)}s`);
     syncSubtitleByPlayerTime();
+    const current = (el<HTMLDivElement>("subtitleOverlay").textContent || "").trim();
+    if (current) fitOverlayByVideoWidth(current);
   };
 
   player.ontimeupdate = () => syncSubtitleByPlayerTime();
@@ -248,15 +326,31 @@ function setupVideoSource(path: string) {
   player.load();
 }
 
-function fillDerivedPaths() {
+function isDerivedFromInput(value: string, input: string, suffix: string): boolean {
+  if (!value || !input) return false;
+  return value === extSwap(input, suffix);
+}
+
+function fillDerivedPaths(options?: { force?: boolean; previousInput?: string }) {
   const input = el<HTMLInputElement>("inputVideo").value.trim();
   if (!input) return;
+  const force = Boolean(options?.force);
+  const previousInput = options?.previousInput?.trim() || "";
 
-  if (!el<HTMLInputElement>("audioWav").value.trim()) el<HTMLInputElement>("audioWav").value = extSwap(input, ".audio.wav");
-  if (!el<HTMLInputElement>("whisperJson").value.trim()) el<HTMLInputElement>("whisperJson").value = extSwap(input, ".asr.raw.json");
-  if (!el<HTMLInputElement>("subtitlesJson").value.trim()) el<HTMLInputElement>("subtitlesJson").value = extSwap(input, ".asr.json");
-  if (!el<HTMLInputElement>("correctedJson").value.trim()) el<HTMLInputElement>("correctedJson").value = extSwap(input, ".asr.corrected.json");
-  if (!el<HTMLInputElement>("renderedVideo").value.trim()) el<HTMLInputElement>("renderedVideo").value = extSwap(input, ".subtitled.mp4");
+  const syncField = (id: string, suffix: string) => {
+    const node = el<HTMLInputElement>(id);
+    const cur = node.value.trim();
+    const replaceBecauseOldDerived =
+      !!previousInput && isDerivedFromInput(cur, previousInput, suffix);
+    if (force || !cur || replaceBecauseOldDerived) {
+      node.value = extSwap(input, suffix);
+    }
+  };
+  syncField("audioWav", ".audio.wav");
+  syncField("whisperJson", ".asr.raw.json");
+  syncField("subtitlesJson", ".asr.json");
+  syncField("correctedJson", ".asr.corrected.json");
+  syncField("renderedVideo", ".subtitled.mp4");
 
   // compatibility fields
   el<HTMLInputElement>("clippedVideo").value = extSwap(input, ".clip.mp4");
@@ -270,8 +364,9 @@ function getProject(): ProjectConfig {
     clippedVideo: el<HTMLInputElement>("clippedVideo").value.trim(),
     renderedVideo: el<HTMLInputElement>("renderedVideo").value.trim(),
     audioWav: el<HTMLInputElement>("audioWav").value.trim(),
-    whisperBin: el<HTMLInputElement>("whisperBin").value.trim(),
-    whisperModel: el<HTMLInputElement>("whisperModel").value.trim(),
+    toolApiOrigin: "",
+    dashscopeApiKey: el<HTMLInputElement>("dashscopeApiKey").value.trim(),
+    asrModel: el<HTMLInputElement>("asrModel").value.trim() || "fun-asr",
     whisperJson: el<HTMLInputElement>("whisperJson").value.trim(),
     subtitlesJson: el<HTMLInputElement>("subtitlesJson").value.trim(),
     correctedJson: el<HTMLInputElement>("correctedJson").value.trim(),
@@ -281,44 +376,6 @@ function getProject(): ProjectConfig {
     cutDuration: 0,
     subtitleStyle: readSubtitleStyle(),
   };
-}
-
-function setProject(project: ProjectConfig) {
-  el<HTMLInputElement>("inputVideo").value = project.inputVideo || "";
-  el<HTMLInputElement>("renderedVideo").value = project.renderedVideo || "";
-  el<HTMLInputElement>("audioWav").value = project.audioWav || "";
-  el<HTMLInputElement>("whisperBin").value = project.whisperBin || "";
-  el<HTMLInputElement>("whisperModel").value = project.whisperModel || "";
-  el<HTMLInputElement>("whisperJson").value = project.whisperJson || "";
-  el<HTMLInputElement>("subtitlesJson").value = project.subtitlesJson || "";
-  el<HTMLInputElement>("correctedJson").value = project.correctedJson || "";
-  el<HTMLInputElement>("referenceScript").value = project.referenceScript || "";
-  el<HTMLInputElement>("language").value = project.language || "zh";
-  el<HTMLSelectElement>("position").value = project.subtitleStyle?.position || "bottom";
-  el<HTMLInputElement>("fontSize").value = String(project.subtitleStyle?.fontSize || 17);
-  el<HTMLInputElement>("textColor").value = project.subtitleStyle?.textColor || "#ffe200";
-  el<HTMLInputElement>("bgColor").value = project.subtitleStyle?.backgroundColor || "#000000";
-  el<HTMLInputElement>("roundedRequired").checked = Boolean(project.subtitleStyle?.roundedRequired);
-  el<HTMLInputElement>("roundedRadius").value = String(project.subtitleStyle?.roundedRadius ?? 16);
-  el<HTMLInputElement>("boxPadding").value = String(project.subtitleStyle?.boxPadding ?? 18);
-  el<HTMLInputElement>("bgOpacity").value = String(project.subtitleStyle?.bgOpacity ?? 68);
-  el<HTMLInputElement>("xPaddingScale").value = String(project.subtitleStyle?.xPaddingScale ?? 1);
-  fillDerivedPaths();
-  setupVideoSource(project.inputVideo);
-  setOverlayEnabled(true);
-  const style = readSubtitleStyle();
-  applySubtitleStyleToOverlay(style);
-  syncStylePanelPreview(style);
-}
-
-function applyLocalSetup(setup: LocalSetup) {
-  if (setup.whisperBin && !el<HTMLInputElement>("whisperBin").value.trim()) {
-    el<HTMLInputElement>("whisperBin").value = setup.whisperBin;
-  }
-  if (setup.whisperModel && !el<HTMLInputElement>("whisperModel").value.trim()) {
-    el<HTMLInputElement>("whisperModel").value = setup.whisperModel;
-  }
-  el<HTMLDivElement>("setupStatus").textContent = setup.message;
 }
 
 function secFormat(s: number): string {
@@ -349,6 +406,10 @@ function parseSecInput(value: string, fallback: number): number {
 }
 
 function renderSegments(track: SubtitleTrack) {
+  track.segments = (track.segments || []).map((seg) => ({
+    ...seg,
+    text: (seg.text || "").replace(/\s+/g, " ").trim(),
+  }));
   currentTrack = track;
   currentTrackPath = currentTrackPath || "";
   const list = el<HTMLDivElement>("subtitleList");
@@ -358,42 +419,67 @@ function renderSegments(track: SubtitleTrack) {
     return;
   }
 
+  const escapeAttr = (value: string) =>
+    (value ?? "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+
   list.innerHTML = track.segments
     .map(
       (seg, i) => `
       <article class="segment-item" data-index="${i}">
-        <div class="segment-head">
-          <span>#${i + 1}</span>
+        <div class="segment-time-line">
+          <span class="segment-index">#${i + 1}</span>
           <span class="segment-time-editor">
             <input class="segment-time-input segment-time-start" data-index="${i}" value="${secFormat(seg.start)}" />
-            <span>~</span>
+            <span class="segment-time-sep">~</span>
             <input class="segment-time-input segment-time-end" data-index="${i}" value="${secFormat(seg.end)}" />
           </span>
         </div>
-        <textarea class="segment-text" data-index="${i}">${seg.text || ""}</textarea>
+        <input
+          class="segment-text-input"
+          data-index="${i}"
+          value="${escapeAttr((seg.text || "").replace(/\s+/g, " ").trim())}"
+          spellcheck="false"
+        />
       </article>
     `,
     )
     .join("");
 
   list.querySelectorAll(".segment-item").forEach((node) => {
-    node.addEventListener("click", () => {
-      const idx = Number((node as HTMLElement).dataset.index || -1);
+    node.addEventListener("click", (e) => {
+      const item = node as HTMLElement;
+      const idx = Number(item.dataset.index || -1);
       jumpToSegment(idx);
+      if (e.target === item) {
+        const input = item.querySelector(".segment-text-input") as HTMLInputElement | null;
+        input?.focus();
+        input?.select();
+      }
     });
   });
 
-  list.querySelectorAll(".segment-text").forEach((node) => {
-    node.addEventListener("focus", (e) => {
-      const idx = Number((e.target as HTMLTextAreaElement).dataset.index || -1);
+  list.querySelectorAll(".segment-text-input").forEach((node) => {
+    node.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const idx = Number((e.target as HTMLInputElement).dataset.index || -1);
       jumpToSegment(idx);
     });
+    node.addEventListener("focus", (e) => {
+      const idx = Number((e.target as HTMLInputElement).dataset.index || -1);
+      setActiveSegment(idx, true);
+    });
     node.addEventListener("input", (e) => {
-      const t = e.target as HTMLTextAreaElement;
-      const idx = Number(t.dataset.index || -1);
+      const input = e.target as HTMLInputElement;
+      const idx = Number(input.dataset.index || -1);
       if (!currentTrack || idx < 0 || idx >= currentTrack.segments.length) return;
-      currentTrack.segments[idx].text = t.value;
-      if (idx === activeSegmentIndex) setOverlayText(t.value);
+      const value = input.value.replace(/\s+/g, " ").trim();
+      currentTrack.segments[idx].text = value;
+      if (idx === activeSegmentIndex) setOverlayText(value);
     });
   });
 
@@ -401,13 +487,12 @@ function renderSegments(track: SubtitleTrack) {
     const idx = Number(target.dataset.index || -1);
     if (!currentTrack || idx < 0 || idx >= currentTrack.segments.length) return;
     const seg = currentTrack.segments[idx];
-    const raw = parseSecInput(target.value, isStart ? seg.start : seg.end);
+    const nextValue = parseSecInput(target.value, isStart ? seg.start : seg.end);
     if (isStart) {
-      seg.start = Math.min(raw, Math.max(0, seg.end - 0.01));
+      seg.start = Math.min(nextValue, Math.max(0, seg.end - 0.01));
     } else {
-      seg.end = Math.max(raw, seg.start + 0.01);
+      seg.end = Math.max(nextValue, seg.start + 0.01);
     }
-    target.value = secFormat(isStart ? seg.start : seg.end);
     const startNode = document.querySelector(`.segment-time-start[data-index="${idx}"]`) as HTMLInputElement | null;
     const endNode = document.querySelector(`.segment-time-end[data-index="${idx}"]`) as HTMLInputElement | null;
     if (startNode) startNode.value = secFormat(seg.start);
@@ -415,20 +500,65 @@ function renderSegments(track: SubtitleTrack) {
     syncSubtitleByPlayerTime();
   };
 
-  list.querySelectorAll(".segment-time-start").forEach((node) => {
-    node.addEventListener("change", (e) => onTimeChanged(e.target as HTMLInputElement, true));
-    node.addEventListener("keydown", (e) => {
-      if ((e as KeyboardEvent).key === "Enter") {
-        onTimeChanged(e.target as HTMLInputElement, true);
-      }
-    });
-  });
+  const adjustTimeByStep = (target: HTMLInputElement, isStart: boolean, delta: number) => {
+    const idx = Number(target.dataset.index || -1);
+    if (!currentTrack || idx < 0 || idx >= currentTrack.segments.length) return;
+    const seg = currentTrack.segments[idx];
+    const baseValue = isStart ? seg.start : seg.end;
+    target.value = secFormat(Math.max(0, baseValue + delta));
+    onTimeChanged(target, isStart);
+    target.select();
+  };
 
-  list.querySelectorAll(".segment-time-end").forEach((node) => {
-    node.addEventListener("change", (e) => onTimeChanged(e.target as HTMLInputElement, false));
+  const focusSiblingTimeInput = (target: HTMLInputElement, forward: boolean) => {
+    const idx = Number(target.dataset.index || -1);
+    const selector = forward ? ".segment-time-end" : ".segment-time-start";
+    let nextNode: HTMLInputElement | null = null;
+    if (target.classList.contains("segment-time-start") && forward) {
+      nextNode = document.querySelector(`${selector}[data-index="${idx}"]`) as HTMLInputElement | null;
+    } else if (target.classList.contains("segment-time-end") && !forward) {
+      nextNode = document.querySelector(`${selector}[data-index="${idx}"]`) as HTMLInputElement | null;
+    }
+    if (nextNode) {
+      nextNode.focus();
+      nextNode.select();
+    }
+  };
+
+  list.querySelectorAll(".segment-time-input").forEach((node) => {
+    node.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const idx = Number((e.target as HTMLInputElement).dataset.index || -1);
+      jumpToSegment(idx);
+    });
+    node.addEventListener("focus", (e) => {
+      e.stopPropagation();
+      const target = e.target as HTMLInputElement;
+      const idx = Number(target.dataset.index || -1);
+      setActiveSegment(idx, true);
+      target.select();
+    });
+    node.addEventListener("change", (e) => {
+      const target = e.target as HTMLInputElement;
+      onTimeChanged(target, target.classList.contains("segment-time-start"));
+    });
     node.addEventListener("keydown", (e) => {
-      if ((e as KeyboardEvent).key === "Enter") {
-        onTimeChanged(e.target as HTMLInputElement, false);
+      const event = e as KeyboardEvent;
+      const target = e.target as HTMLInputElement;
+      const isStart = target.classList.contains("segment-time-start");
+      if (event.key === "Enter") {
+        onTimeChanged(target, isStart);
+      } else if (event.key === "ArrowUp") {
+        event.preventDefault();
+        adjustTimeByStep(target, isStart, 0.1);
+      } else if (event.key === "ArrowDown") {
+        event.preventDefault();
+        adjustTimeByStep(target, isStart, -0.1);
+      } else if (event.key === "Tab") {
+        if ((isStart && !event.shiftKey) || (!isStart && event.shiftKey)) {
+          event.preventDefault();
+          focusSiblingTimeInput(target, !event.shiftKey);
+        }
       }
     });
   });
@@ -460,7 +590,7 @@ async function loadTrack(path: string) {
 async function generateSubtitles() {
   const p = getProject();
   if (!p.inputVideo) throw new Error("请先导入视频");
-  if (!p.whisperBin || !p.whisperModel) throw new Error("未检测到本地转写引擎，请先检测或一键安装");
+  if (!p.dashscopeApiKey) throw new Error("请先填写 DASHSCOPE_API_KEY");
 
   await step("抽取音频", async () => {
     log(`参数: input=${p.inputVideo}`);
@@ -468,17 +598,15 @@ async function generateSubtitles() {
     await invoke("extract_audio", { input: p.inputVideo, output: p.audioWav });
   });
 
-  await step("本地转写", async () => {
-    log(`参数: whisperBin=${p.whisperBin}`);
-    log(`参数: model=${p.whisperModel}`);
+  await step("云端转写", async () => {
+    log(`参数: asrModel=${p.asrModel}`);
     log(`参数: whisperJson=${p.whisperJson}`);
     log(`参数: subtitlesOut=${p.subtitlesJson}`);
     await invoke("transcribe_audio", {
-      whisperBin: p.whisperBin,
-      model: p.whisperModel,
+      dashscopeApiKey: p.dashscopeApiKey,
+      asrModel: p.asrModel,
       wav: p.audioWav,
       whisperJson: p.whisperJson,
-      language: p.language,
       subtitlesOut: p.subtitlesJson,
     });
   });
@@ -514,12 +642,13 @@ function bind() {
   el<HTMLButtonElement>("pickVideo").onclick = async () => {
     const selected = await invoke<string | null>("pick_video_file");
     if (selected) {
+      const previousInput = el<HTMLInputElement>("inputVideo").value.trim();
       el<HTMLInputElement>("inputVideo").value = selected;
-      fillDerivedPaths();
+      fillDerivedPaths({ force: true, previousInput });
+      el<HTMLInputElement>("inputVideo").dataset.prevInput = selected;
       setupVideoSource(selected);
       setOverlayEnabled(true);
-      const suggested = await invoke<string>("suggest_project_path", { inputVideo: selected });
-      el<HTMLInputElement>("projectPath").value = suggested;
+      log(`输出默认路径: ${el<HTMLInputElement>("renderedVideo").value.trim()}`);
       log(`已导入视频: ${selected}`);
     }
   };
@@ -538,29 +667,60 @@ function bind() {
     });
   };
 
-  el<HTMLButtonElement>("btnBurn").onclick = async () => {
-    await step("烧录字幕", async () => {
+  el<HTMLButtonElement>("btnExport").onclick = async () => {
+    const p = getProject();
+    const fallback = p.renderedVideo || extSwap(p.inputVideo, ".subtitled.mp4");
+    el<HTMLInputElement>("exportPath").value = fallback;
+    showExportModal();
+  };
+
+  el<HTMLButtonElement>("pickExportPath").onclick = async () => {
+    const current = el<HTMLInputElement>("exportPath").value.trim();
+    const selected = await invoke<string | null>("pick_export_file", {
+      suggestedPath: current || null,
+    });
+    if (selected) {
+      el<HTMLInputElement>("exportPath").value = selected;
+    }
+  };
+
+  el<HTMLButtonElement>("closeExportModal").onclick = () => {
+    resetExportProgress();
+    hideExportModal();
+  };
+
+  el<HTMLButtonElement>("confirmExport").onclick = async () => {
+    setExportProgress(0, "准备导出");
+    await step("导出视频", async () => {
       const p = getProject();
-      const subtitleForBurn = p.correctedJson || p.subtitlesJson;
-      const outputVideo = p.renderedVideo || extSwap(p.inputVideo, ".subtitled.mp4");
+      const subtitleForBurn = currentTrackPath || p.correctedJson || p.subtitlesJson;
+      const outputVideo = el<HTMLInputElement>("exportPath").value.trim() || p.renderedVideo || extSwap(p.inputVideo, ".subtitled.mp4");
+      const resolution = el<HTMLSelectElement>("exportResolution").value;
+      const bitrate = el<HTMLInputElement>("exportBitrate").value.trim() || "6M";
       if (!p.inputVideo || !subtitleForBurn) throw new Error("请先准备视频和字幕文件");
       log(`参数: inputVideo=${p.inputVideo}`);
       log(`参数: subtitles=${subtitleForBurn}`);
       log(`参数: outputVideo=${outputVideo}`);
+      log(`参数: resolution=${resolution}, bitrate=${bitrate}`);
       log(`参数: roundedRequired=${p.subtitleStyle.roundedRequired}`);
       log(
         `参数: roundedRadius=${p.subtitleStyle.roundedRadius}, boxPadding=${p.subtitleStyle.boxPadding}, bgOpacity=${p.subtitleStyle.bgOpacity}, xPaddingScale=${p.subtitleStyle.xPaddingScale}`,
       );
-      const burnRoute = await invoke<string>("burn_subtitles", {
+      const result = await invoke<ExportResult>("export_subtitled_video", {
         inputVideo: p.inputVideo,
         subtitlesJson: subtitleForBurn,
         outputVideo,
+        resolution,
+        bitrate,
         style: p.subtitleStyle,
       });
-      log(`烧录路由: ${burnRoute}`);
+      log(`烧录路由: ${result.route}`);
       setupVideoSource(outputVideo);
       setOverlayEnabled(false);
-      log(`烧录字幕完成: ${outputVideo}`);
+      el<HTMLInputElement>("renderedVideo").value = outputVideo;
+      setExportProgress(100, "导出完成 100%");
+      hideExportModal();
+      log(`导出完成: ${outputVideo}`);
     });
   };
 
@@ -590,14 +750,7 @@ function bind() {
   el<HTMLButtonElement>("loadOriginalSubtitles").onclick = async () => {
     const p = getProject();
     await step("加载识别字幕", async () => {
-      await loadTrack(p.subtitlesJson);
-    });
-  };
-
-  el<HTMLButtonElement>("loadCorrectedSubtitles").onclick = async () => {
-    const p = getProject();
-    await step("加载纠正字幕", async () => {
-      await loadTrack(p.correctedJson);
+      await loadTrack(currentTrackPath || p.correctedJson || p.subtitlesJson);
     });
   };
 
@@ -618,47 +771,12 @@ function bind() {
     });
   };
 
-  el<HTMLButtonElement>("btnSave").onclick = async () => {
-    let projectPath = el<HTMLInputElement>("projectPath").value.trim();
-    if (!projectPath) {
-      projectPath = await invoke<string>("suggest_project_path", { inputVideo: getProject().inputVideo || null });
-      el<HTMLInputElement>("projectPath").value = projectPath;
-    }
-    await step("保存项目", async () => {
-      await invoke("save_project", { path: projectPath, project: getProject() });
-      log(`项目已保存: ${projectPath}`);
-    });
-  };
-
-  el<HTMLButtonElement>("btnLoad").onclick = async () => {
-    const projectPath = el<HTMLInputElement>("projectPath").value.trim();
-    await step("加载项目", async () => {
-      const project = await invoke<ProjectConfig>("load_project", { path: projectPath });
-      setProject(project);
-      const targetPath = project.correctedJson || project.subtitlesJson;
-      if (targetPath) {
-        try {
-          await loadTrack(targetPath);
-        } catch {
-          renderSegments({ language: "zh", segments: [] });
-        }
-      }
-    });
-  };
-
   el<HTMLInputElement>("inputVideo").addEventListener("change", () => {
-    fillDerivedPaths();
+    const previousInput = (el<HTMLInputElement>("inputVideo").dataset.prevInput || "").trim();
+    fillDerivedPaths({ previousInput });
     setupVideoSource(el<HTMLInputElement>("inputVideo").value.trim());
     setOverlayEnabled(true);
-    invoke<string>("suggest_project_path", {
-      inputVideo: el<HTMLInputElement>("inputVideo").value.trim() || null,
-    })
-      .then((path) => {
-        if (!el<HTMLInputElement>("projectPath").value.trim()) {
-          el<HTMLInputElement>("projectPath").value = path;
-        }
-      })
-      .catch(() => {});
+    el<HTMLInputElement>("inputVideo").dataset.prevInput = el<HTMLInputElement>("inputVideo").value.trim();
   });
 
   const onStyleChanged = () => {
@@ -673,22 +791,6 @@ function bind() {
   });
   el<HTMLVideoElement>("previewVideo").addEventListener("click", () => activateTab("subtitles"));
 
-  el<HTMLButtonElement>("btnDetectWhisper").onclick = async () => {
-    await step("检测转写环境", async () => {
-      const setup = await invoke<LocalSetup>("detect_local_setup");
-      applyLocalSetup(setup);
-      log(`环境检测: ${setup.message}`);
-    });
-  };
-
-  el<HTMLButtonElement>("btnInstallWhisper").onclick = async () => {
-    await step("安装转写引擎", async () => {
-      log("开始安装 whisper-cpp 和 base 模型，可能需要几分钟...");
-      const setup = await invoke<LocalSetup>("install_local_whisper_base");
-      applyLocalSetup(setup);
-      log("安装完成");
-    });
-  };
 }
 
 window.addEventListener("DOMContentLoaded", () => {
@@ -699,17 +801,31 @@ window.addEventListener("DOMContentLoaded", () => {
   applySubtitleStyleToOverlay(style);
   syncStylePanelPreview(style);
   log("应用已启动");
-  invoke<string>("suggest_project_path", { inputVideo: null })
-    .then((path) => {
-      if (!el<HTMLInputElement>("projectPath").value.trim()) {
-        el<HTMLInputElement>("projectPath").value = path;
+  el<HTMLInputElement>("inputVideo").dataset.prevInput = el<HTMLInputElement>("inputVideo").value.trim();
+  listen("menu-export", () => {
+    const p = getProject();
+    el<HTMLInputElement>("exportPath").value = p.renderedVideo || extSwap(p.inputVideo, ".subtitled.mp4");
+    resetExportProgress();
+    showExportModal();
+  }).catch(() => {});
+  listen<ExportProgressPayload>("export-progress", (event) => {
+    setExportProgress(event.payload.percent, event.payload.text || `${event.payload.percent}%`);
+  }).catch((e) => log(`监听导出进度失败: ${errText(e)}`));
+  invoke<AsrRuntimeConfig>("get_asr_runtime_config")
+    .then((cfg) => {
+      const keyInput = el<HTMLInputElement>("dashscopeApiKey");
+      if (!keyInput.value.trim() && cfg.dashscopeApiKey) {
+        keyInput.value = cfg.dashscopeApiKey;
+        log(`已从环境变量读取 DASHSCOPE_API_KEY（长度: ${cfg.dashscopeApiKey.length}）`);
+      } else if (!cfg.dashscopeApiKey) {
+        log("未从环境变量读取到 DASHSCOPE_API_KEY，可在页面粘贴");
       }
+      log(`ASR服务已固定使用: ${cfg.apiOrigin}`);
     })
-    .catch(() => {});
-  invoke<LocalSetup>("detect_local_setup")
-    .then((setup) => {
-      applyLocalSetup(setup);
-      log(`环境检测: ${setup.message}`);
-    })
-    .catch((e) => log(`环境检测失败: ${errText(e)}`));
+    .catch((e) => log(`读取 ASR 运行配置失败: ${errText(e)}`));
+
+  window.addEventListener("resize", () => {
+    const current = (el<HTMLDivElement>("subtitleOverlay").textContent || "").trim();
+    if (current) fitOverlayByVideoWidth(current);
+  });
 });
