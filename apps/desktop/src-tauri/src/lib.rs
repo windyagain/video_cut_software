@@ -22,6 +22,8 @@ struct SubtitleStyle {
     box_padding: u32,
     #[serde(default = "default_bg_opacity")]
     bg_opacity: u8,
+    #[serde(default = "default_x_padding_scale")]
+    x_padding_scale: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -304,6 +306,29 @@ async fn extract_audio(input: String, output: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn strip_audio(input: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let input_path = Path::new(&input);
+        let parent = input_path
+            .parent()
+            .filter(|p| p.as_os_str().len() > 0)
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        let stem = input_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("audio");
+        let output_path = parent.join(format!("{}.wav", stem));
+        let output = output_path.to_string_lossy().to_string();
+        
+        ffmpeg::extract_audio_wav_mono16k(&input, &output).map_err(|e| e.to_string())?;
+        Ok(output)
+    })
+    .await
+    .map_err(|e| format!("strip_audio task join failed: {e}"))?
+}
+
+#[tauri::command]
 async fn transcribe_audio(
     whisper_bin: String,
     model: String,
@@ -329,20 +354,26 @@ async fn burn_subtitles(
     subtitles_json: String,
     output_video: String,
     style: SubtitleStyle,
-) -> Result<(), String> {
+) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let track = SubtitleTrack::from_json_file(&subtitles_json).map_err(|e| e.to_string())?;
         if style.rounded_required {
             let ass_path = std::env::temp_dir().join("video_cut_studio_burn.rounded.ass");
-            let ass_content = build_rounded_ass_script(&track, &style);
+            let ass_content = build_rounded_ass_script(&track, &style, &input_video);
             fs::write(&ass_path, ass_content).map_err(|e| format!("写入ASS文件失败: {e}"))?;
-            ffmpeg::burn_ass_file(&input_video, &ass_path, &output_video).map_err(|e| e.to_string())
+            ffmpeg::burn_ass_file(&input_video, &ass_path, &output_video)
+                .map_err(|e| e.to_string())?;
+            Ok(format!(
+                "route=rounded_ass, ass_path={}",
+                ass_path.to_string_lossy()
+            ))
         } else {
             let srt_path = std::env::temp_dir().join("video_cut_studio_burn.srt");
             track.to_srt_file(&srt_path).map_err(|e| e.to_string())?;
             let force_style = build_ass_style(&style);
             ffmpeg::burn_subtitles(&input_video, &srt_path, &output_video, Some(&force_style))
-                .map_err(|e| e.to_string())
+                .map_err(|e| e.to_string())?;
+            Ok(format!("route=legacy_srt, srt_path={}", srt_path.to_string_lossy()))
         }
     })
     .await
@@ -519,30 +550,40 @@ fn default_bg_opacity() -> u8 {
     68
 }
 
+fn default_x_padding_scale() -> f32 {
+    1.0
+}
+
 fn opacity_percent_to_ass_alpha(opacity: u8) -> u8 {
     let v = opacity.min(100) as f32 / 100.0;
     let alpha = 255.0 * (1.0 - v);
     alpha.round() as u8
 }
 
-fn build_rounded_ass_script(track: &SubtitleTrack, style: &SubtitleStyle) -> String {
-    let play_res_x = 1920_i32;
-    let play_res_y = 1080_i32;
-    let font_size = style.font_size.max(20) as i32;
-    let (anchor, y, align) = match style.position.as_str() {
-        "top" => ("\\an8", 120_i32, 8_i32),
-        "center" => ("\\an5", play_res_y / 2, 5_i32),
-        _ => ("\\an2", play_res_y - 120, 2_i32),
-    };
+fn build_rounded_ass_script(track: &SubtitleTrack, style: &SubtitleStyle, input_video: &str) -> String {
+    let (play_res_x, play_res_y) = probe_video_size(input_video).unwrap_or((1920_i32, 1080_i32));
+    let scale = (play_res_y as f32 / 460.0).clamp(1.2, 4.5);
+    let font_size = ((style.font_size.max(12) as f32) * scale).round() as i32;
+    let anchor = "\\an5";
+    let align = 5_i32;
 
-    let text_color = hex_to_ass(&style.text_color, 0x00);
-    let box_color = hex_to_ass(
-        &style.background_color,
-        opacity_percent_to_ass_alpha(style.bg_opacity),
-    );
+    let text_color = hex_to_ass_bgr(&style.text_color);
+    let box_color = hex_to_ass_bgr(&style.background_color);
+    let box_alpha = ass_alpha(opacity_percent_to_ass_alpha(style.bg_opacity));
     let padding = style.box_padding.max(4) as i32;
+    let x_padding_scale = style.x_padding_scale.clamp(0.5, 1.0);
+    let horizontal_padding = ((padding as f32) * x_padding_scale).round() as i32;
     let box_h = (font_size as f32 * 1.45) as i32 + padding * 2;
     let radius = (style.rounded_radius.max(2) as i32).min((box_h / 2).max(2));
+    // Optical baseline compensation for CJK heavy subtitles with bold style.
+    // Keeps top/bottom visual padding closer to symmetric.
+    let text_optical_offset = ((font_size as f32) * 0.08).round() as i32;
+    let margin = 36_i32;
+    let y = match style.position.as_str() {
+        "top" => margin + box_h / 2,
+        "center" => play_res_y / 2,
+        _ => play_res_y - margin - box_h / 2,
+    };
 
     let mut out = String::new();
     out.push_str("[Script Info]\n");
@@ -552,9 +593,9 @@ fn build_rounded_ass_script(track: &SubtitleTrack, style: &SubtitleStyle) -> Str
     out.push_str("[V4+ Styles]\n");
     out.push_str("Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding\n");
     out.push_str(&format!(
-        "Style: RoundedText,PingFang SC,{font_size},{text_color},&H000000FF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,0,0,{align},20,20,24,1\n"
+        "Style: RoundedText,PingFang SC,{font_size},&H00FFFFFF,&H000000FF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,0,0,{align},20,20,24,1\n"
     ));
-    out.push_str("Style: RoundedShape,Arial,20,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,0,0,2,20,20,24,1\n\n");
+    out.push_str("Style: RoundedShape,Arial,20,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,0,0,5,20,20,24,1\n\n");
     out.push_str("[Events]\n");
     out.push_str("Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text\n");
 
@@ -562,23 +603,36 @@ fn build_rounded_ass_script(track: &SubtitleTrack, style: &SubtitleStyle) -> Str
         let start = to_ass_time(seg.start);
         let end = to_ass_time(seg.end);
         let text = escape_ass_text(&seg.text);
-        let char_count = text.chars().count().max(4) as i32;
-        let box_w = ((char_count as f32 * font_size as f32 * 0.62) as i32 + padding * 2)
-            .clamp(260, play_res_x - 120);
+        // 宽度估算：中文接近 1em，ASCII 接近 0.58em，空格单独减重
+        let text_width: f32 = text.chars().map(|c| {
+            if c.is_whitespace() {
+                font_size as f32 * 0.33
+            } else if c.is_ascii() {
+                font_size as f32 * 0.58
+            } else {
+                font_size as f32 * 0.98
+            }
+        }).sum();
+        let min_width = font_size as f32 * 6.0; // 至少 6 个汉字宽度，避免短句背景过窄
+        let box_w = (text_width.max(min_width) + (horizontal_padding.max(2) * 2) as f32)
+            .clamp(200.0, (play_res_x - 120) as f32) as i32;
         let shape = rounded_box_path(box_w, box_h, radius);
+        let shape_x = play_res_x / 2;
+        let shape_y = y;
         let shape_tag = format!(
-            "{{{}\\pos({},{})\\p1\\1c{}\\bord0\\shad0}}{}",
+            "{{{}\\pos({},{})\\p1\\c{}\\1a{}\\bord0\\shad0}}{}{{\\p0}}",
             anchor,
-            play_res_x / 2,
-            y,
+            shape_x,
+            shape_y,
             box_color,
+            box_alpha,
             shape
         );
         let text_tag = format!(
-            "{{{}\\pos({},{})\\bord0\\shad0\\1c{}}}{}",
+            "{{{}\\pos({},{})\\bord0\\shad0\\1c{}\\1a&H00&}}{}",
             anchor,
             play_res_x / 2,
-            y,
+            y - text_optical_offset,
             text_color,
             text
         );
@@ -592,24 +646,71 @@ fn build_rounded_ass_script(track: &SubtitleTrack, style: &SubtitleStyle) -> Str
     out
 }
 
+fn probe_video_size(input_video: &str) -> Option<(i32, i32)> {
+    let ffprobe = first_existing(&[
+        "/opt/homebrew/bin/ffprobe",
+        "/usr/local/bin/ffprobe",
+        "/usr/bin/ffprobe",
+    ])?;
+    let out = Command::new(ffprobe)
+        .arg("-v")
+        .arg("error")
+        .arg("-select_streams")
+        .arg("v:0")
+        .arg("-show_entries")
+        .arg("stream=width,height")
+        .arg("-of")
+        .arg("csv=s=x:p=0")
+        .arg(input_video)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let mut it = s.split('x');
+    let w = it.next()?.trim().parse::<i32>().ok()?;
+    let h = it.next()?.trim().parse::<i32>().ok()?;
+    if w > 0 && h > 0 { Some((w, h)) } else { None }
+}
+
 fn rounded_box_path(width: i32, height: i32, radius: i32) -> String {
-    let w2 = width / 2;
-    let h2 = height / 2;
-    let r = radius.min(w2 - 1).min(h2 - 1).max(2);
+    let r = radius.min((width / 2).saturating_sub(1)).min((height / 2).saturating_sub(1)).max(2);
     let k = ((r as f32) * 0.552_284_8_f32) as i32;
-    // Centered at 0,0. ASS vector with cubic bezier.
+    let w = width.max(4);
+    let h = height.max(4);
+    let wr = w - r;
+    let hr = h - r;
+    let wrk = wr + k;
+    let hrk = hr + k;
+    let rk = r - k;
     format!(
-        "m {} {} l {} {} b {} {} {} {} {} {} l {} {} b {} {} {} {} {} {} l {} {} b {} {} {} {} {} {} l {} {} b {} {} {} {} {} {}",
-        -w2 + r, -h2,
-        w2 - r, -h2,
-        w2 - r + k, -h2, w2, -h2 + r - k, w2, -h2 + r,
-        w2, h2 - r,
-        w2, h2 - r + k, w2 - r + k, h2, w2 - r, h2,
-        -w2 + r, h2,
-        -w2 + r - k, h2, -w2, h2 - r + k, -w2, h2 - r,
-        -w2, -h2 + r,
-        -w2, -h2 + r - k, -w2 + r - k, -h2, -w2 + r, -h2
+        "m {r} 0 \
+         l {wr} 0 \
+         b {wrk} 0 {w} {rk} {w} {r} \
+         l {w} {hr} \
+         b {w} {hrk} {wrk} {h} {wr} {h} \
+         l {r} {h} \
+         b {rk} {h} 0 {hrk} 0 {hr} \
+         l 0 {r} \
+         b 0 {rk} {rk} 0 {r} 0 c"
     )
+}
+
+
+fn hex_to_ass_bgr(hex: &str) -> String {
+    let h = hex.trim().trim_start_matches('#');
+    if h.len() != 6 {
+        return "&HFFFFFF&".to_string();
+    }
+    let r = &h[0..2];
+    let g = &h[2..4];
+    let b = &h[4..6];
+    format!("&H{}{}{}&", b, g, r)
+}
+
+fn ass_alpha(alpha: u8) -> String {
+    format!("&H{alpha:02X}&")
 }
 
 fn to_ass_time(sec: f32) -> String {
@@ -641,6 +742,7 @@ pub fn run() {
             install_local_whisper_base,
             cut_video,
             extract_audio,
+            strip_audio,
             transcribe_audio,
             burn_subtitles,
             correct_subtitles,
@@ -661,4 +763,48 @@ fn extract_json_payload(s: &str) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod local_round_burn_tests {
+    use super::*;
+
+    #[test]
+    fn test_local_rounded_burn_quick_20s() {
+        let input_video = "/Users/pxy/PycharmProjects/video_cut_software/scripts/quick_20s.mp4";
+        let subtitles_json =
+            "/Users/pxy/PycharmProjects/video_cut_software/scripts/kimi_run_script.json";
+        let output_video =
+            "/Users/pxy/PycharmProjects/video_cut_software/scripts/quick_20s.rounded.test.mp4";
+
+        if !Path::new(input_video).exists() || !Path::new(subtitles_json).exists() {
+            eprintln!(
+                "[skip] local test file missing: input={}, subtitles={}",
+                input_video, subtitles_json
+            );
+            return;
+        }
+
+        let track = SubtitleTrack::from_json_file(subtitles_json).expect("load subtitle json");
+        let style = SubtitleStyle {
+            position: "bottom".to_string(),
+            font_size: 17,
+            text_color: "#ffe200".to_string(),
+            background_color: "#000000".to_string(),
+            rounded_required: true,
+            rounded_radius: 16,
+            box_padding: 9,
+            bg_opacity: 45,
+            x_padding_scale: 1.0,
+        };
+        let ass_content = build_rounded_ass_script(&track, &style, input_video);
+        let ass_path = std::env::temp_dir().join("video_cut_studio_burn.rounded.ass");
+        fs::write(&ass_path, ass_content).expect("write ass");
+        ffmpeg::burn_ass_file(input_video, &ass_path, output_video).expect("burn ass");
+        assert!(Path::new(output_video).exists(), "output should exist");
+        eprintln!(
+            "[ok] rounded burn output={}",
+            output_video
+        );
+    }
 }

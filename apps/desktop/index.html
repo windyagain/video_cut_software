@@ -39,6 +39,7 @@
           <div class="topbar-actions">
             <button id="btnGenerateSubtitles" class="primary">1. 生成字幕</button>
             <button id="btnBurn">2. 手动烧录字幕</button>
+            <button id="btnStripAudio">3. 剥离音频文件</button>
           </div>
         </header>
 
@@ -102,7 +103,7 @@
             </label>
           </div>
           <label class="style-field">
-            <input id="roundedRequired" type="checkbox" />
+            <input id="roundedRequired" type="checkbox" checked />
             必须圆角（新路线烧录）
           </label>
           <div class="style-compact-row">
@@ -114,6 +115,9 @@
             </label>
             <label class="style-compact-item">透明度%
               <input id="bgOpacity" type="number" min="0" max="100" step="1" value="68" />
+            </label>
+            <label class="style-compact-item">留白系数
+              <input id="xPaddingScale" type="number" min="0.5" max="1" step="0.05" value="1" />
             </label>
           </div>
           <p class="muted">当前样式先作为项目配置保存，导出渲染下一步接入。</p>

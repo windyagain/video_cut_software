@@ -31,6 +31,11 @@ enum Commands {
         #[arg(long)]
         output: String,
     },
+    /// Extract audio to the same directory as input video with same filename
+    StripAudio {
+        #[arg(long)]
+        input: String,
+    },
     Transcribe {
         #[arg(long)]
         whisper_bin: String,
@@ -88,6 +93,27 @@ async fn main() -> anyhow::Result<()> {
         Commands::ExtractAudio { input, output } => {
             ffmpeg::extract_audio_wav_mono16k(input, output)?;
             println!("audio extraction completed");
+        }
+        Commands::StripAudio { input } => {
+            let input_path = std::path::Path::new(&input);
+            let parent = input_path
+                .parent()
+                .filter(|p| p.as_os_str().len() > 0)
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")));
+            let stem = input_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("audio");
+            let output_path = parent.join(format!("{}.wav", stem));
+            let output = output_path.to_string_lossy().to_string();
+            
+            eprintln!("[strip-audio] input: {}", input);
+            eprintln!("[strip-audio] output: {}", output);
+            
+            ffmpeg::extract_audio_wav_mono16k(&input, &output)?;
+            
+            println!("audio stripped to: {}", output);
         }
         Commands::Transcribe {
             whisper_bin,

@@ -10,6 +10,7 @@ type SubtitleStyle = {
   roundedRadius: number;
   boxPadding: number;
   bgOpacity: number;
+  xPaddingScale: number;
 };
 
 type ProjectConfig = {
@@ -109,6 +110,7 @@ function setOverlayEnabled(enabled: boolean) {
 }
 
 function readSubtitleStyle(): SubtitleStyle {
+  const xPaddingScale = Number(el<HTMLInputElement>("xPaddingScale").value || 1);
   return {
     position: el<HTMLSelectElement>("position").value,
     fontSize: Number(el<HTMLInputElement>("fontSize").value || 17),
@@ -118,6 +120,7 @@ function readSubtitleStyle(): SubtitleStyle {
     roundedRadius: Number(el<HTMLInputElement>("roundedRadius").value || 16),
     boxPadding: Number(el<HTMLInputElement>("boxPadding").value || 18),
     bgOpacity: Number(el<HTMLInputElement>("bgOpacity").value || 68),
+    xPaddingScale: Math.min(1, Math.max(0.5, xPaddingScale)),
   };
 }
 
@@ -130,19 +133,20 @@ function applySubtitleStyleToOverlay(style: SubtitleStyle) {
   const r = parseInt(hex.slice(0, 2), 16) || 0;
   const g = parseInt(hex.slice(2, 4), 16) || 0;
   const b = parseInt(hex.slice(4, 6), 16) || 0;
+  const scale = Math.min(1, Math.max(0.5, style.xPaddingScale));
   overlay.style.backgroundColor = `rgba(${r}, ${g}, ${b}, ${opacity.toFixed(2)})`;
-  overlay.style.padding = `${Math.max(4, style.boxPadding)}px ${Math.max(8, Math.round(style.boxPadding * 1.3))}px`;
+  overlay.style.padding = `${Math.max(4, style.boxPadding)}px ${Math.max(6, Math.round(style.boxPadding * 1.3 * scale))}px`;
   overlay.style.borderRadius = `${Math.max(2, style.roundedRadius)}px`;
   overlay.style.top = "";
   overlay.style.bottom = "";
   overlay.style.transform = "translateX(-50%)";
   if (style.position === "top") {
-    overlay.style.top = "18px";
+    overlay.style.top = "36px";
   } else if (style.position === "center") {
     overlay.style.top = "50%";
     overlay.style.transform = "translate(-50%, -50%)";
   } else {
-    overlay.style.bottom = "18px";
+    overlay.style.bottom = "36px";
   }
 }
 
@@ -298,6 +302,7 @@ function setProject(project: ProjectConfig) {
   el<HTMLInputElement>("roundedRadius").value = String(project.subtitleStyle?.roundedRadius ?? 16);
   el<HTMLInputElement>("boxPadding").value = String(project.subtitleStyle?.boxPadding ?? 18);
   el<HTMLInputElement>("bgOpacity").value = String(project.subtitleStyle?.bgOpacity ?? 68);
+  el<HTMLInputElement>("xPaddingScale").value = String(project.subtitleStyle?.xPaddingScale ?? 1);
   fillDerivedPaths();
   setupVideoSource(project.inputVideo);
   setOverlayEnabled(true);
@@ -544,17 +549,30 @@ function bind() {
       log(`参数: outputVideo=${outputVideo}`);
       log(`参数: roundedRequired=${p.subtitleStyle.roundedRequired}`);
       log(
-        `参数: roundedRadius=${p.subtitleStyle.roundedRadius}, boxPadding=${p.subtitleStyle.boxPadding}, bgOpacity=${p.subtitleStyle.bgOpacity}`,
+        `参数: roundedRadius=${p.subtitleStyle.roundedRadius}, boxPadding=${p.subtitleStyle.boxPadding}, bgOpacity=${p.subtitleStyle.bgOpacity}, xPaddingScale=${p.subtitleStyle.xPaddingScale}`,
       );
-      await invoke("burn_subtitles", {
+      const burnRoute = await invoke<string>("burn_subtitles", {
         inputVideo: p.inputVideo,
         subtitlesJson: subtitleForBurn,
         outputVideo,
         style: p.subtitleStyle,
       });
+      log(`烧录路由: ${burnRoute}`);
       setupVideoSource(outputVideo);
       setOverlayEnabled(false);
       log(`烧录字幕完成: ${outputVideo}`);
+    });
+  };
+
+  el<HTMLButtonElement>("btnStripAudio").onclick = async () => {
+    await step("剥离音频", async () => {
+      const p = getProject();
+      if (!p.inputVideo) throw new Error("请先导入视频");
+      log(`参数: input=${p.inputVideo}`);
+      const outputPath = await invoke<string>("strip_audio", { input: p.inputVideo });
+      log(`音频已剥离到: ${outputPath}`);
+      // 自动填充到 audioWav 字段
+      el<HTMLInputElement>("audioWav").value = outputPath;
     });
   };
 
@@ -648,7 +666,7 @@ function bind() {
     applySubtitleStyleToOverlay(style);
     syncStylePanelPreview(style);
   };
-  ["position", "fontSize", "textColor", "bgColor", "roundedRequired", "roundedRadius", "boxPadding", "bgOpacity"].forEach((id) => {
+  ["position", "fontSize", "textColor", "bgColor", "roundedRequired", "roundedRadius", "boxPadding", "bgOpacity", "xPaddingScale"].forEach((id) => {
     const node = el<HTMLElement>(id);
     node.addEventListener("input", onStyleChanged);
     node.addEventListener("change", onStyleChanged);
