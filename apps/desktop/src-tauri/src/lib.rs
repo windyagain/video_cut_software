@@ -64,6 +64,7 @@ struct LocalSetup {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CorrectionRuntimeConfig {
+    base_url: String,
     model: String,
     batch_size: usize,
     concurrency: usize,
@@ -75,6 +76,8 @@ struct CorrectionRuntimeConfig {
 struct AsrRuntimeConfig {
     api_origin: String,
     dashscope_api_key: String,
+    dashscope_base_url: String,
+    correction_model: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -120,7 +123,7 @@ fn default_model_path() -> Option<PathBuf> {
 }
 
 fn correction_batch_size() -> usize {
-    std::env::var("SILICONFLOW_CORRECT_BATCH_SIZE")
+    std::env::var("DASHSCOPE_CORRECT_BATCH_SIZE")
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
         .filter(|n| *n > 0)
@@ -128,7 +131,7 @@ fn correction_batch_size() -> usize {
 }
 
 fn correction_concurrency() -> usize {
-    std::env::var("SILICONFLOW_CORRECT_CONCURRENCY")
+    std::env::var("DASHSCOPE_CORRECT_CONCURRENCY")
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
         .filter(|n| *n > 0)
@@ -136,7 +139,7 @@ fn correction_concurrency() -> usize {
 }
 
 fn correction_max_tokens() -> u32 {
-    std::env::var("SILICONFLOW_CORRECT_MAX_TOKENS")
+    std::env::var("DASHSCOPE_CORRECT_MAX_TOKENS")
         .ok()
         .and_then(|s| s.parse::<u32>().ok())
         .filter(|n| *n > 0)
@@ -144,9 +147,14 @@ fn correction_max_tokens() -> u32 {
 }
 
 fn correction_model() -> String {
-    std::env::var("SILICONFLOW_CORRECT_MODEL")
-        .or_else(|_| std::env::var("SILICONFLOW_TEXT_MODEL"))
-        .unwrap_or_else(|_| "Pro/Qwen/Qwen2.5-7B-Instruct".to_string())
+    std::env::var("DASHSCOPE_CORRECT_MODEL")
+        .or_else(|_| std::env::var("DASHSCOPE_TEXT_MODEL"))
+        .unwrap_or_else(|_| "qwen-plus-2025-07-28".to_string())
+}
+
+fn correction_base_url() -> String {
+    std::env::var("DASHSCOPE_BASE_URL")
+        .unwrap_or_else(|_| "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string())
 }
 
 fn asr_api_origin() -> String {
@@ -168,10 +176,31 @@ fn resolve_dashscope_api_key() -> Option<String> {
             let _ = dotenvy::from_path(path);
         }
     }
-    std::env::var("DASHSCOPE_API_KEY")
+    let from_env = std::env::var("DASHSCOPE_API_KEY")
         .ok()
         .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+        .filter(|s| !s.is_empty());
+    if from_env.is_some() {
+        return from_env;
+    }
+
+    // Finder/Applications started GUI usually does not inherit shell env vars.
+    for shell in ["/bin/zsh", "/bin/bash"] {
+        let Ok(output) = Command::new(shell)
+            .args(["-lic", "printenv DASHSCOPE_API_KEY"])
+            .output()
+        else {
+            continue;
+        };
+        if !output.status.success() {
+            continue;
+        }
+        let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !value.is_empty() {
+            return Some(value);
+        }
+    }
+    None
 }
 
 fn default_download_dir() -> PathBuf {
@@ -363,6 +392,7 @@ fn suggest_project_path(input_video: Option<String>) -> Result<String, String> {
 #[tauri::command]
 fn get_correction_runtime_config() -> CorrectionRuntimeConfig {
     CorrectionRuntimeConfig {
+        base_url: correction_base_url(),
         model: correction_model(),
         batch_size: correction_batch_size(),
         concurrency: correction_concurrency(),
@@ -375,6 +405,8 @@ fn get_asr_runtime_config() -> AsrRuntimeConfig {
     AsrRuntimeConfig {
         api_origin: asr_api_origin(),
         dashscope_api_key: resolve_dashscope_api_key().unwrap_or_default(),
+        dashscope_base_url: correction_base_url(),
+        correction_model: correction_model(),
     }
 }
 
@@ -422,7 +454,7 @@ async fn transcribe_audio(
     wav: String,
     whisper_json: String,
     subtitles_out: String,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let final_api_origin = asr_api_origin();
     let final_api_key = if dashscope_api_key.trim().is_empty() {
         resolve_dashscope_api_key().unwrap_or_default()
@@ -432,16 +464,64 @@ async fn transcribe_audio(
     if final_api_key.is_empty() {
         return Err("请填写 DASHSCOPE_API_KEY".to_string());
     }
-    let (raw_body, track) = asr::transcribe_with_tool_asr(
-        &final_api_origin,
-        &wav,
-        &final_api_key,
-        &asr_model,
-    )
-    .await
-    .map_err(|e| e.to_string())?;
+    let direct_result =
+        asr::transcribe_with_dashscope_direct(&wav, &final_api_key, &asr_model).await;
+    let (raw_body, track, asr_route, asr_detail) = match direct_result {
+        Ok((raw, track)) if !track.segments.is_empty() => {
+            let file_url = serde_json::from_str::<serde_json::Value>(&raw)
+                .ok()
+                .and_then(|v| {
+                    v.get("file_url")
+                        .and_then(serde_json::Value::as_str)
+                        .map(|s| s.to_string())
+                })
+                .unwrap_or_default();
+            (
+                raw,
+                track,
+                "direct_litterbox_dashscope".to_string(),
+                if file_url.is_empty() {
+                    "uploaded_url=<unknown>".to_string()
+                } else {
+                    format!("uploaded_url={file_url}")
+                },
+            )
+        }
+        Ok((_raw, _track)) => {
+            eprintln!(
+                "[asr] direct dashscope chain returned empty segments, fallback to /tool/audio_asr"
+            );
+            let (raw, track) =
+                asr::transcribe_with_tool_asr(&final_api_origin, &wav, &final_api_key, &asr_model)
+                .await
+                .map_err(|e| e.to_string())?;
+            (
+                raw,
+                track,
+                "fallback_tool_audio_asr".to_string(),
+                "reason=direct_empty_segments".to_string(),
+            )
+        }
+        Err(err) => {
+            eprintln!("[asr] direct dashscope chain failed: {err}; fallback to /tool/audio_asr");
+            let (raw, track) =
+                asr::transcribe_with_tool_asr(&final_api_origin, &wav, &final_api_key, &asr_model)
+                .await
+                .map_err(|e| e.to_string())?;
+            (
+                raw,
+                track,
+                "fallback_tool_audio_asr".to_string(),
+                format!("reason=direct_error:{err}"),
+            )
+        }
+    };
     fs::write(&whisper_json, raw_body).map_err(|e| e.to_string())?;
-    track.to_json_file(&subtitles_out).map_err(|e| e.to_string())
+    track.to_json_file(&subtitles_out).map_err(|e| e.to_string())?;
+    Ok(format!(
+        "route={asr_route}, {asr_detail}, segments={}",
+        track.segments.len()
+    ))
 }
 
 #[tauri::command]
@@ -605,6 +685,9 @@ async fn correct_subtitles(
     subtitles: String,
     output: String,
     reference: Option<String>,
+    dashscope_api_key: Option<String>,
+    dashscope_base_url: Option<String>,
+    correction_model: Option<String>,
 ) -> Result<(), String> {
     let (track, reference_content) =
         tauri::async_runtime::spawn_blocking(move || -> Result<_, String> {
@@ -619,7 +702,12 @@ async fn correct_subtitles(
         .await
         .map_err(|e| format!("correct_subtitles load task join failed: {e}"))??;
 
-    let client = SiliconFlowClient::from_env().map_err(|e| e.to_string())?;
+    let client = SiliconFlowClient::from_config(
+        dashscope_api_key.as_deref(),
+        dashscope_base_url.as_deref(),
+        correction_model.as_deref(),
+    )
+    .map_err(|e| e.to_string())?;
     let corrected = client
         .correct_subtitles(&track, reference_content.as_deref())
         .await

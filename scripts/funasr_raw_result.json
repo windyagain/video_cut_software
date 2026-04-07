@@ -1,0 +1,220 @@
+{
+  "file_url": "http://101.34.207.228:81/static/others/quick_20s.audio.wav",
+  "properties": {
+    "audio_format": "pcm_s16le",
+    "channels": [
+      0
+    ],
+    "original_sampling_rate": 16000,
+    "original_duration_in_milliseconds": 20000
+  },
+  "transcripts": [
+    {
+      "channel_id": 0,
+      "content_duration_in_milliseconds": 14920,
+      "text": "嗯。最近对OS2.0进行了一个学习，然后这里简单对自己。学的东西做一个分享吧，然后写了一个实践的demo。嗯，首先介绍一下。",
+      "sentences": [
+        {
+          "begin_time": 600,
+          "end_time": 1200,
+          "text": "嗯。",
+          "sentence_id": 1,
+          "words": [
+            {
+              "begin_time": 600,
+              "end_time": 1200,
+              "text": "嗯",
+              "punctuation": "。"
+            }
+          ]
+        },
+        {
+          "begin_time": 2930,
+          "end_time": 11330,
+          "text": "最近对OS2.0进行了一个学习，然后这里简单对自己。",
+          "sentence_id": 2,
+          "words": [
+            {
+              "begin_time": 2930,
+              "end_time": 3410,
+              "text": "最近",
+              "punctuation": ""
+            },
+            {
+              "begin_time": 3410,
+              "end_time": 3690,
+              "text": "对",
+              "punctuation": ""
+            },
+            {
+              "begin_time": 3690,
+              "end_time": 4170,
+              "text": "OS",
+              "punctuation": ""
+            },
+            {
+              "begin_time": 4170,
+              "end_time": 4290,
+              "text": "2",
+              "punctuation": ""
+            },
+            {
+              "begin_time": 4290,
+              "end_time": 4450,
+              "text": ".",
+              "punctuation": ""
+            },
+            {
+              "begin_time": 4450,
+              "end_time": 4890,
+              "text": "0",
+              "punctuation": ""
+            },
+            {
+              "begin_time": 4890,
+              "end_time": 5330,
+              "text": "进行了",
+              "punctuation": ""
+            },
+            {
+              "begin_time": 5330,
+              "end_time": 6010,
+              "text": "一个",
+              "punctuation": ""
+            },
+            {
+              "begin_time": 6770,
+              "end_time": 7370,
+              "text": "学习",
+              "punctuation": "，"
+            },
+            {
+              "begin_time": 7930,
+              "end_time": 8410,
+              "text": "然后",
+              "punctuation": ""
+            },
+            {
+              "begin_time": 8410,
+              "end_time": 8930,
+              "text": "这里",
+              "punctuation": ""
+            },
+            {
+              "begin_time": 8930,
+              "end_time": 9690,
+              "text": "简单",
+              "punctuation": ""
+            },
+            {
+              "begin_time": 10410,
+              "end_time": 11330,
+              "text": "对自己",
+              "punctuation": "。"
+            }
+          ]
+        },
+        {
+          "begin_time": 12990,
+          "end_time": 17590,
+          "text": "学的东西做一个分享吧，然后写了一个实践的demo。",
+          "sentence_id": 3,
+          "words": [
+            {
+              "begin_time": 12990,
+              "end_time": 13150,
+              "text": "学",
+              "punctuation": ""
+            },
+            {
+              "begin_time": 13150,
+              "end_time": 13710,
+              "text": "的东西",
+              "punctuation": ""
+            },
+            {
+              "begin_time": 13710,
+              "end_time": 14390,
+              "text": "做一个",
+              "punctuation": ""
+            },
+            {
+              "begin_time": 14390,
+              "end_time": 14870,
+              "text": "分享",
+              "punctuation": ""
+            },
+            {
+              "begin_time": 14870,
+              "end_time": 15110,
+              "text": "吧",
+              "punctuation": "，"
+            },
+            {
+              "begin_time": 15350,
+              "end_time": 15750,
+              "text": "然后",
+              "punctuation": ""
+            },
+            {
+              "begin_time": 15750,
+              "end_time": 15950,
+              "text": "写",
+              "punctuation": ""
+            },
+            {
+              "begin_time": 15950,
+              "end_time": 16470,
+              "text": "了一个",
+              "punctuation": ""
+            },
+            {
+              "begin_time": 16470,
+              "end_time": 16790,
+              "text": "实践",
+              "punctuation": ""
+            },
+            {
+              "begin_time": 16790,
+              "end_time": 16990,
+              "text": "的",
+              "punctuation": ""
+            },
+            {
+              "begin_time": 16990,
+              "end_time": 17590,
+              "text": "demo",
+              "punctuation": "。"
+            }
+          ]
+        },
+        {
+          "begin_time": 18630,
+          "end_time": 19950,
+          "text": "嗯，首先介绍一下。",
+          "sentence_id": 4,
+          "words": [
+            {
+              "begin_time": 18630,
+              "end_time": 18870,
+              "text": "嗯",
+              "punctuation": "，"
+            },
+            {
+              "begin_time": 19030,
+              "end_time": 19550,
+              "text": "首先",
+              "punctuation": ""
+            },
+            {
+              "begin_time": 19550,
+              "end_time": 19950,
+              "text": "介绍一下",
+              "punctuation": "。"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

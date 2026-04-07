@@ -20,15 +20,31 @@ pub struct SiliconFlowClient {
 }
 
 impl SiliconFlowClient {
-    pub fn from_env() -> anyhow::Result<Self> {
-        let api_key = resolve_api_key().context(
-            "SILICONFLOW_API_KEY is not set（GUI 启动通常不会继承 shell 环境变量；请在项目 .env 或 ~/.video_cut_studio/.env 中配置）",
-        )?;
-        let base_url = std::env::var("SILICONFLOW_BASE_URL")
-            .unwrap_or_else(|_| "https://api.siliconflow.cn/v1".to_string());
-        let model = std::env::var("SILICONFLOW_CORRECT_MODEL")
-            .or_else(|_| std::env::var("SILICONFLOW_TEXT_MODEL"))
-            .unwrap_or_else(|_| "Pro/Qwen/Qwen2.5-7B-Instruct".to_string());
+    pub fn from_config(
+        api_key: Option<&str>,
+        base_url: Option<&str>,
+        model: Option<&str>,
+    ) -> anyhow::Result<Self> {
+        let api_key = api_key
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string)
+            .or_else(resolve_api_key)
+            .context(
+                "DASHSCOPE_API_KEY is not set（GUI 启动通常不会继承 shell 环境变量；请在项目 .env 或 ~/.video_cut_studio/.env 中配置）",
+            )?;
+        let base_url = base_url
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string)
+            .or_else(resolve_dashscope_base_url)
+            .unwrap_or_else(|| "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string());
+        let model = model
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string)
+            .or_else(resolve_correction_model)
+            .unwrap_or_else(|| "qwen-plus-2025-07-28".to_string());
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(180))
@@ -43,6 +59,10 @@ impl SiliconFlowClient {
         })
     }
 
+    pub fn from_env() -> anyhow::Result<Self> {
+        Self::from_config(None, None, None)
+    }
+
     pub async fn correct_subtitles(
         &self,
         track: &SubtitleTrack,
@@ -50,12 +70,12 @@ impl SiliconFlowClient {
     ) -> anyhow::Result<Vec<CorrectedSegment>> {
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
         let reference_trimmed = trim_reference(reference_script);
-        let batch_size = std::env::var("SILICONFLOW_CORRECT_BATCH_SIZE")
+        let batch_size = std::env::var("DASHSCOPE_CORRECT_BATCH_SIZE")
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
             .filter(|n| *n > 0)
             .unwrap_or(20);
-        let concurrency = std::env::var("SILICONFLOW_CORRECT_CONCURRENCY")
+        let concurrency = std::env::var("DASHSCOPE_CORRECT_CONCURRENCY")
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
             .filter(|n| *n > 0)
@@ -67,7 +87,7 @@ impl SiliconFlowClient {
         }
 
         eprintln!(
-            "[siliconflow] dispatch correction batches: total_segments={}, batch_size={}, concurrency={}",
+            "[dashscope] dispatch correction batches: total_segments={}, batch_size={}, concurrency={}",
             total, batch_size, concurrency
         );
 
@@ -85,7 +105,7 @@ impl SiliconFlowClient {
             handles.push(tokio::spawn(async move {
                 let _permit = sem.acquire_owned().await.context("acquire semaphore failed")?;
                 eprintln!(
-                    "[siliconflow] batch {}/{} start: range=[{}..{}], count={}",
+                    "[dashscope] batch {}/{} start: range=[{}..{}], count={}",
                     batch_no + 1,
                     total_batches,
                     start,
@@ -104,7 +124,7 @@ impl SiliconFlowClient {
                         }
                         Err(e) => {
                             eprintln!(
-                                "[siliconflow] batch {}/{} attempt {} failed: {}",
+                                "[dashscope] batch {}/{} attempt {} failed: {}",
                                 batch_no + 1,
                                 total_batches,
                                 attempt,
@@ -116,13 +136,13 @@ impl SiliconFlowClient {
                 }
                 if !ok {
                     eprintln!(
-                        "[siliconflow] batch {}/{} fallback to keep original text (no correction applied)",
+                        "[dashscope] batch {}/{} fallback to keep original text (no correction applied)",
                         batch_no + 1,
                         total_batches
                     );
                 }
                 eprintln!(
-                    "[siliconflow] batch {}/{} done: items={}",
+                    "[dashscope] batch {}/{} done: items={}",
                     batch_no + 1,
                     total_batches,
                     result.len()
@@ -135,7 +155,7 @@ impl SiliconFlowClient {
         for handle in handles {
             let items = handle
                 .await
-                .context("siliconflow batch join failed")??;
+                .context("dashscope batch join failed")??;
             merged.extend(items);
         }
         merged.sort_by_key(|i| i.index);
@@ -149,7 +169,7 @@ impl SiliconFlowClient {
         segment_count: usize,
     ) -> anyhow::Result<Vec<CorrectedSegment>> {
         eprintln!(
-            "[siliconflow] start correction: model={}, segments={}, prompt_chars={}",
+            "[dashscope] start correction: model={}, segments={}, prompt_chars={}",
             self.model,
             segment_count,
             prompt.chars().count()
@@ -182,7 +202,7 @@ impl SiliconFlowClient {
             while !wait_flag_clone.load(Ordering::Relaxed) {
                 let elapsed = start_at.elapsed().as_secs_f32();
                 eprintln!(
-                    "[siliconflow] waiting model response... model={}, elapsed={:.1}s",
+                    "[dashscope] waiting model response... model={}, elapsed={:.1}s",
                     model_for_log, elapsed
                 );
                 tokio::time::sleep(Duration::from_secs(1)).await;
@@ -196,11 +216,11 @@ impl SiliconFlowClient {
             .json(&req_json_mode)
             .send()
             .await
-            .context("failed to call SiliconFlow chat completions")?;
+            .context("failed to call DashScope-compatible chat completions")?;
         wait_flag.store(true, Ordering::Relaxed);
         let _ = wait_logger.await;
         eprintln!(
-            "[siliconflow] first response arrived in {:.2}s",
+            "[dashscope] first response arrived in {:.2}s",
             start_at.elapsed().as_secs_f32()
         );
 
@@ -211,7 +231,7 @@ impl SiliconFlowClient {
             let body = resp.text().await.unwrap_or_default();
             if body.to_lowercase().contains("json mode is not supported") {
                 eprintln!(
-                    "[siliconflow] model does not support json mode, retry without response_format"
+                    "[dashscope] model does not support json mode, retry without response_format"
                 );
                 let req_fallback = ChatCompletionRequest {
                     model: self.model.clone(),
@@ -227,22 +247,22 @@ impl SiliconFlowClient {
                     .json(&req_fallback)
                     .send()
                     .await
-                    .context("failed to retry SiliconFlow without json mode")?;
+                    .context("failed to retry without json mode")?;
                 if !retry.status().is_success() {
                     let retry_status = retry.status();
                     let retry_body = retry.text().await.unwrap_or_default();
-                    bail!("SiliconFlow API failed: {retry_status}, body: {retry_body}");
+                    bail!("DashScope-compatible API failed: {retry_status}, body: {retry_body}");
                 }
                 parse_chat_content(retry).await?
             } else {
-                bail!("SiliconFlow API failed: {status}, body: {body}");
+                bail!("DashScope-compatible API failed: {status}, body: {body}");
             }
         };
 
         let result =
             parse_corrected_output(&content).context("model output is not valid corrected JSON")?;
         eprintln!(
-            "[siliconflow] correction parsed ok: corrected_items={}",
+            "[dashscope] correction parsed ok: corrected_items={}",
             result.len()
         );
 
@@ -254,13 +274,13 @@ async fn parse_chat_content(resp: reqwest::Response) -> anyhow::Result<String> {
     let parsed: ChatCompletionResponse = resp
         .json()
         .await
-        .context("failed to parse SiliconFlow response")?;
+        .context("failed to parse chat completion response")?;
     parsed
         .choices
         .first()
         .and_then(|c| c.message.content.as_ref())
         .cloned()
-        .context("missing content in SiliconFlow response")
+        .context("missing content in chat completion response")
 }
 
 fn extract_json_payload(s: &str) -> Option<String> {
@@ -565,7 +585,7 @@ fn build_prompt_for_chunk(
 }
 
 fn trim_reference(reference_script: Option<&str>) -> Option<String> {
-    let max_chars = std::env::var("SILICONFLOW_REFERENCE_MAX_CHARS")
+    let max_chars = std::env::var("DASHSCOPE_REFERENCE_MAX_CHARS")
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
         .filter(|n| *n > 0)
@@ -583,7 +603,7 @@ fn resolve_api_key() -> Option<String> {
     let _ = dotenvy::dotenv();
     load_dotenv_candidates();
 
-    if let Ok(v) = std::env::var("SILICONFLOW_API_KEY") {
+    if let Ok(v) = std::env::var("DASHSCOPE_API_KEY") {
         let t = v.trim();
         if !t.is_empty() {
             return Some(t.to_string());
@@ -591,6 +611,21 @@ fn resolve_api_key() -> Option<String> {
     }
 
     api_key_from_shell()
+}
+
+fn resolve_dashscope_base_url() -> Option<String> {
+    std::env::var("DASHSCOPE_BASE_URL")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn resolve_correction_model() -> Option<String> {
+    std::env::var("DASHSCOPE_CORRECT_MODEL")
+        .or_else(|_| std::env::var("DASHSCOPE_TEXT_MODEL"))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 fn load_dotenv_candidates() {
@@ -613,7 +648,7 @@ fn load_dotenv_candidates() {
 fn api_key_from_shell() -> Option<String> {
     for shell in ["/bin/zsh", "/bin/bash"] {
         let Ok(output) = Command::new(shell)
-            .args(["-lic", "printenv SILICONFLOW_API_KEY"])
+            .args(["-lic", "printenv DASHSCOPE_API_KEY"])
             .output()
         else {
             continue;
@@ -641,7 +676,7 @@ struct ChatCompletionRequest {
 }
 
 fn default_max_tokens() -> u32 {
-    std::env::var("SILICONFLOW_CORRECT_MAX_TOKENS")
+    std::env::var("DASHSCOPE_CORRECT_MAX_TOKENS")
         .ok()
         .and_then(|s| s.parse::<u32>().ok())
         .filter(|n| *n > 0)

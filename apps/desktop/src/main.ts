@@ -21,6 +21,8 @@ type ProjectConfig = {
   audioWav: string;
   toolApiOrigin: string;
   dashscopeApiKey: string;
+  dashscopeBaseUrl: string;
+  correctionModel: string;
   asrModel: string;
   whisperJson: string;
   subtitlesJson: string;
@@ -44,6 +46,7 @@ type SubtitleTrack = {
 };
 
 type CorrectionRuntimeConfig = {
+  baseUrl: string;
   model: string;
   batchSize: number;
   concurrency: number;
@@ -53,6 +56,8 @@ type CorrectionRuntimeConfig = {
 type AsrRuntimeConfig = {
   apiOrigin: string;
   dashscopeApiKey: string;
+  dashscopeBaseUrl: string;
+  correctionModel: string;
 };
 
 type ExportProgressPayload = {
@@ -366,6 +371,8 @@ function getProject(): ProjectConfig {
     audioWav: el<HTMLInputElement>("audioWav").value.trim(),
     toolApiOrigin: "",
     dashscopeApiKey: el<HTMLInputElement>("dashscopeApiKey").value.trim(),
+    dashscopeBaseUrl: el<HTMLInputElement>("dashscopeBaseUrl").value.trim(),
+    correctionModel: el<HTMLInputElement>("correctionModel").value.trim() || "qwen-plus-2025-07-28",
     asrModel: el<HTMLInputElement>("asrModel").value.trim() || "fun-asr",
     whisperJson: el<HTMLInputElement>("whisperJson").value.trim(),
     subtitlesJson: el<HTMLInputElement>("subtitlesJson").value.trim(),
@@ -602,13 +609,14 @@ async function generateSubtitles() {
     log(`参数: asrModel=${p.asrModel}`);
     log(`参数: whisperJson=${p.whisperJson}`);
     log(`参数: subtitlesOut=${p.subtitlesJson}`);
-    await invoke("transcribe_audio", {
+    const asrInfo = await invoke<string>("transcribe_audio", {
       dashscopeApiKey: p.dashscopeApiKey,
       asrModel: p.asrModel,
       wav: p.audioWav,
       whisperJson: p.whisperJson,
       subtitlesOut: p.subtitlesJson,
     });
+    log(`ASR链路: ${asrInfo}`);
   });
 
   let targetSubtitlePath = p.subtitlesJson;
@@ -616,15 +624,20 @@ async function generateSubtitles() {
     log(`参数: subtitles=${p.subtitlesJson}`);
     log(`参数: correctedOut=${p.correctedJson}`);
     log(`参数: reference=${p.referenceScript || "<none>"}`);
+    log(`参数: dashscopeBaseUrl=${p.dashscopeBaseUrl || "<default>"}`);
+    log(`参数: correctionModel=${p.correctionModel}`);
     const runtime = await invoke<CorrectionRuntimeConfig>("get_correction_runtime_config");
     log(
-      `纠正配置: model=${runtime.model}, batch=${runtime.batchSize}, concurrency=${runtime.concurrency}, maxTokens=${runtime.maxTokens}`,
+      `纠正配置: baseUrl=${runtime.baseUrl}, model=${runtime.model}, batch=${runtime.batchSize}, concurrency=${runtime.concurrency}, maxTokens=${runtime.maxTokens}`,
     );
 
     await invoke("correct_subtitles", {
       subtitles: p.subtitlesJson,
       output: p.correctedJson,
       reference: p.referenceScript || null,
+      dashscopeApiKey: p.dashscopeApiKey || null,
+      dashscopeBaseUrl: p.dashscopeBaseUrl || null,
+      correctionModel: p.correctionModel || null,
     });
     targetSubtitlePath = p.correctedJson;
     log("字幕纠正完成（Rust 并发分批）");
@@ -819,6 +832,15 @@ window.addEventListener("DOMContentLoaded", () => {
         log(`已从环境变量读取 DASHSCOPE_API_KEY（长度: ${cfg.dashscopeApiKey.length}）`);
       } else if (!cfg.dashscopeApiKey) {
         log("未从环境变量读取到 DASHSCOPE_API_KEY，可在页面粘贴");
+      }
+      const baseUrlInput = el<HTMLInputElement>("dashscopeBaseUrl");
+      if (!baseUrlInput.value.trim() && cfg.dashscopeBaseUrl) {
+        baseUrlInput.value = cfg.dashscopeBaseUrl;
+        log(`已读取 DASHSCOPE_BASE_URL: ${cfg.dashscopeBaseUrl}`);
+      }
+      const correctionModelInput = el<HTMLInputElement>("correctionModel");
+      if (!correctionModelInput.value.trim() && cfg.correctionModel) {
+        correctionModelInput.value = cfg.correctionModel;
       }
       log(`ASR服务已固定使用: ${cfg.apiOrigin}`);
     })
